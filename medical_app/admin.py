@@ -1,6 +1,15 @@
 from django.contrib import admin
 
-from .models import ChatMessage, ChatSession, FeaturedImage, LoginActivity, UserProfile
+from .models import (
+    ChatMessage,
+    ChatSession,
+    FeaturedImage,
+    LoginActivity,
+    MedicalAnalysis,
+    PendingRegistration,
+    TreatmentEntry,
+    UserProfile,
+)
 
 
 @admin.register(UserProfile)
@@ -26,6 +35,20 @@ class FeaturedImageAdmin(admin.ModelAdmin):
     ordering = ("display_order", "title")
 
 
+@admin.register(PendingRegistration)
+class PendingRegistrationAdmin(admin.ModelAdmin):
+    list_display = (
+        "email",
+        "mobile_number",
+        "verification_attempts",
+        "expires_at",
+        "last_sent_at",
+        "created_at",
+    )
+    search_fields = ("email", "mobile_number", "first_name", "last_name")
+    ordering = ("-created_at",)
+
+
 @admin.register(ChatSession)
 class ChatSessionAdmin(admin.ModelAdmin):
     list_display = ("id", "user", "created_at", "message_count")
@@ -48,3 +71,49 @@ class ChatMessageAdmin(admin.ModelAdmin):
     @staticmethod
     def has_attachment(obj):
         return bool(obj.attachment)
+
+
+@admin.register(MedicalAnalysis)
+class MedicalAnalysisAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "title",
+        "user",
+        "predicted_condition",
+        "risk_level",
+        "progression_status",
+        "model_source",
+        "created_at",
+    )
+    list_filter = ("risk_level", "progression_status", "model_source", "created_at")
+    search_fields = (
+        "title",
+        "predicted_condition",
+        "user__username",
+        "user__email",
+        "symptoms_text",
+        "report_text",
+    )
+    ordering = ("-created_at",)
+
+
+@admin.register(TreatmentEntry)
+class TreatmentEntryAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "analysis",
+        "doctor_name",
+        "doctor_id",
+        "specialization",
+        "added_by",
+        "created_at",
+    )
+    list_filter = ("specialization", "created_at", "updated_at")
+    search_fields = (
+        "doctor_name",
+        "doctor_id",
+        "specialization",
+        "treatment_notes",
+        "analysis__title",
+    )
+    ordering = ("-created_at",)

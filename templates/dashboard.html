@@ -6,9 +6,9 @@
     <section class="page-intro">
         <div>
             <p class="eyebrow">Dashboard Overview</p>
-            <h1>Monitor users, devices, and platform activity.</h1>
+            <h1>Monitor clinical insights, user activity, and platform operations.</h1>
             <p>
-                Review active sign-ins, current device locations, engagement metrics, and user-management actions from one dashboard.
+                Review analysis trends, treatment activity, active sign-ins, device locations, and user-management actions from one professional workspace.
             </p>
         </div>
     </section>
@@ -84,13 +84,13 @@
         <section class="card">
             <div class="card-header">
                 <div>
-                    <h2>Role Distribution</h2>
-                    <p class="card-sub">Current split between administrative and member accounts.</p>
+                    <h2>Risk Distribution</h2>
+                    <p class="card-sub">Current split between high, medium, and low risk analysis records.</p>
                 </div>
             </div>
 
             <div class="progress-list">
-                {% for point in role_chart_data %}
+                {% for point in risk_distribution %}
                     <div class="progress-item">
                         <div class="progress-meta">
                             <span>{{ point.label }}</span>
@@ -99,6 +99,60 @@
                         <div class="progress-track">
                             <div class="progress-fill" style="width: {{ point.width }}%;"></div>
                         </div>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Comparative Analysis</h2>
+                    <p class="card-sub">Previous versus current medical analysis progression.</p>
+                </div>
+            </div>
+
+            <div class="profile-summary">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Status</span>
+                    <strong>{{ analysis_comparison.status }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Condition Delta</span>
+                    <strong>{{ analysis_comparison.delta }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Latest Record</span>
+                    <strong>{% if latest_analysis %}{{ latest_analysis.created_at|date:"M d, Y H:i" }}{% else %}No record{% endif %}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Interpretation</span>
+                    <strong>{{ analysis_comparison.message }}</strong>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Disease Progression Trend</h2>
+                    <p class="card-sub">Condition count trend from the most recent saved clinical analyses.</p>
+                </div>
+            </div>
+
+            <div class="bar-chart">
+                {% for point in analysis_chart_data %}
+                    <div class="bar-column">
+                        <span class="bar-value">{{ point.count }}</span>
+                        <div class="bar-track">
+                            <div class="bar-fill secondary" style="height: {{ point.height }}px;"></div>
+                        </div>
+                        <span class="bar-label">{{ point.label }}</span>
+                    </div>
+                {% empty %}
+                    <div class="empty-state">
+                        <h3>No analysis history yet</h3>
+                        <p>Run clinical analyses from the home page to start tracking progression.</p>
                     </div>
                 {% endfor %}
             </div>
@@ -123,6 +177,74 @@
                     <div class="empty-state">
                         <h3>No active sessions found</h3>
                         <p>Your dashboard will list devices after authenticated activity is recorded.</p>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+    </div>
+
+    <div class="dashboard-grid">
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Recent Clinical Analyses</h2>
+                    <p class="card-sub">Saved report and image analyses with drill-down access.</p>
+                </div>
+            </div>
+
+            <div class="table-wrapper">
+                <table class="dashboard-table">
+                    <thead>
+                        <tr>
+                            <th>Record</th>
+                            <th>Condition</th>
+                            <th>Risk</th>
+                            <th>Trend</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for analysis in recent_analyses %}
+                            <tr>
+                                <td>
+                                    <strong>{{ analysis.title }}</strong>
+                                    <div class="table-subtext">{{ analysis.created_at|date:"M d, Y H:i" }}</div>
+                                </td>
+                                <td>{{ analysis.predicted_condition }}</td>
+                                <td>{{ analysis.risk_level }}</td>
+                                <td>{{ analysis.progression_status }}</td>
+                                <td><a href="{% url 'analysis_detail' analysis.id %}">View Record</a></td>
+                            </tr>
+                        {% empty %}
+                            <tr>
+                                <td colspan="5">No medical analyses saved yet.</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Treatment Audit Trail</h2>
+                    <p class="card-sub">Recent treatment entries with doctor and audit details.</p>
+                </div>
+            </div>
+
+            <div class="session-list">
+                {% for treatment in recent_treatments %}
+                    <article class="session-card">
+                        <strong>{{ treatment.doctor_name }} ({{ treatment.specialization }})</strong>
+                        <span>Doctor ID: {{ treatment.doctor_id }}{% if treatment.contact_details %} &bull; {{ treatment.contact_details }}{% endif %}</span>
+                        <span>Added by {{ treatment.added_by.get_full_name|default:treatment.added_by.username|default:"System" }}</span>
+                        <small>{{ treatment.created_at|date:"M d, Y H:i" }}</small>
+                    </article>
+                {% empty %}
+                    <div class="empty-state">
+                        <h3>No treatments logged yet</h3>
+                        <p>Open a saved analysis record to start entering doctor treatment decisions.</p>
                     </div>
                 {% endfor %}
             </div>

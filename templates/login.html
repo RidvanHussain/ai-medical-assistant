@@ -1,10 +1,23 @@
 {% extends 'base.html' %}
+{% load static %}
 
 {% block title %}Sign In{% endblock %}
 
 {% block content %}
     <section class="auth-wrapper">
         <div class="container">
+            <div class="auth-brand">
+                <img
+                    class="auth-logo"
+                    src="{% static 'img/medical-assistant-logo.svg' %}"
+                    alt="AI Medical Assistant logo"
+                >
+                <div>
+                    <p class="eyebrow">AI Medical Assistant</p>
+                    <p class="auth-brand-copy">Secure clinician access</p>
+                </div>
+            </div>
+
             <p class="eyebrow">Welcome Back</p>
             <h1>Sign in to your account</h1>
             <p class="auth-subtitle">Access the dashboard, saved conversations, user activity, and account settings.</p>

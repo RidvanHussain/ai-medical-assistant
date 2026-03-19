@@ -6,10 +6,10 @@
     <section class="page-intro">
         <div>
             <p class="eyebrow">Clinical Intake</p>
-            <h1>Capture symptoms, review media, and generate a concise patient summary.</h1>
+            <h1>Capture symptoms, analyze reports and images, and generate clinical decision support.</h1>
             <p>
-                Record a voice note, upload a clinical image, or type the symptoms manually.
-                The assistant returns a structured response and optional voice playback.
+                Record a voice note, upload a medical image, attach report findings, or type symptoms manually.
+                The assistant returns a structured response, saves the clinical record, and supports follow-up analytics on the dashboard.
             </p>
         </div>
     </section>
@@ -72,6 +72,24 @@
             <section class="card">
                 <div class="card-header">
                     <div>
+                        <h2>Medical Report Analysis</h2>
+                        <p class="card-sub">Paste report findings or upload a text report for AI-supported interpretation.</p>
+                    </div>
+                </div>
+                <div class="stack">
+                    <textarea
+                        class="auto-expand"
+                        name="report_notes"
+                        placeholder="Paste report findings, observations, lab values, or diagnostic notes here."
+                    >{{ submitted_report_notes }}</textarea>
+                    <input type="file" name="report_file" accept=".txt,.csv,.pdf">
+                    <p class="field-note">Text and CSV files are analyzed directly. PDF files are saved with the record for review.</p>
+                </div>
+            </section>
+
+            <section class="card">
+                <div class="card-header">
+                    <div>
                         <h2>Doctor Response</h2>
                         <p class="card-sub">Structured guidance is shown here once analysis completes.</p>
                     </div>
@@ -81,6 +99,20 @@
                     readonly
                     placeholder="The AI summary will appear here."
                 >{{ doctor_response }}</textarea>
+            </section>
+
+            <section class="card">
+                <div class="card-header">
+                    <div>
+                        <h2>Report Findings Summary</h2>
+                        <p class="card-sub">Structured explanation of uploaded report data and detected clinical patterns.</p>
+                    </div>
+                </div>
+                <textarea
+                    class="auto-expand"
+                    readonly
+                    placeholder="Report analysis findings will appear here."
+                >{{ report_summary }}</textarea>
             </section>
 
             <section class="card">
@@ -118,6 +150,37 @@
             <button type="submit" id="analyzeBtn">Analyze Patient</button>
         </footer>
     </form>
+
+    {% if latest_analysis and user.is_authenticated %}
+        <section class="card analysis-result-card">
+            <div class="card-header">
+                <div>
+                    <h2>Latest Clinical Record Saved</h2>
+                    <p class="card-sub">This analysis has been stored for comparison, dashboard analytics, and treatment tracking.</p>
+                </div>
+                <a class="secondary-link" href="{% url 'analysis_detail' latest_analysis.id %}">Open Record</a>
+            </div>
+
+            <div class="profile-summary">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Predicted Condition</span>
+                    <strong>{{ latest_analysis.predicted_condition }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Risk Level</span>
+                    <strong>{{ latest_analysis.risk_level }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Detected Conditions</span>
+                    <strong>{{ latest_analysis.detected_conditions_count }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Model Source</span>
+                    <strong>{{ latest_analysis.model_source }}</strong>
+                </div>
+            </div>
+        </section>
+    {% endif %}
 
     <section class="feature-section">
         <div class="section-heading">

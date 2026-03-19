@@ -8,6 +8,8 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
+from django.db.models import Q
+from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -18,15 +20,29 @@ from medical_app.ai.brain_of_the_doctor import analyze_image_with_query, encode_
 from medical_app.ai.voice_of_the_doctor import text_to_speech_with_edge
 from medical_app.ai.voice_of_the_patient import transcribe_with_groq
 
+from .analysis_engine import analyze_image_record, analyze_report_text, compare_analyses
 from .bootstrap import ensure_demo_setup
 from .forms import (
+    _build_unique_username,
     AdminUserManagementForm,
     ChatForm,
     LoginForm,
     ProfileSettingsForm,
     RegisterForm,
+    RegistrationOTPForm,
+    TreatmentEntryForm,
 )
-from .models import ChatMessage, ChatSession, FeaturedImage, LoginActivity, UserProfile
+from .models import (
+    ChatMessage,
+    ChatSession,
+    FeaturedImage,
+    LoginActivity,
+    MedicalAnalysis,
+    PendingRegistration,
+    TreatmentEntry,
+    UserProfile,
+)
+from .verification import issue_registration_otp_challenge
 
 load_dotenv()
 
@@ -50,6 +66,10 @@ def _save_uploaded_file(uploaded_file, subdirectory, filename):
 def _build_media_url(file_path):
     relative_path = Path(file_path).relative_to(settings.MEDIA_ROOT).as_posix()
     return f"{settings.MEDIA_URL}{relative_path}"
+
+
+def _build_media_relative_path(file_path):
+    return Path(file_path).relative_to(settings.MEDIA_ROOT).as_posix()
 
 
 def _build_summary_prompt(patient_text, language):
@@ -104,6 +124,33 @@ def _get_session_for_request(request):
     if not session:
         session = ChatSession.objects.create(user=request.user)
     return session
+
+
+def _get_analysis_queryset_for_user(user):
+    if user.is_staff:
+        return MedicalAnalysis.objects.all()
+    return MedicalAnalysis.objects.filter(user=user)
+
+
+def _create_user_from_pending_registration(pending_registration):
+    email = pending_registration.email.strip().lower()
+    if user_model.objects.filter(email__iexact=email).exists():
+        raise ValueError("An account with this email already exists.")
+
+    username_seed = email.split("@")[0]
+    user = user_model(
+        first_name=pending_registration.first_name.strip(),
+        last_name=pending_registration.last_name.strip(),
+        email=email,
+        username=_build_unique_username(username_seed),
+    )
+    user.password = pending_registration.password_hash
+    user.save()
+    UserProfile.objects.update_or_create(
+        user=user,
+        defaults={"mobile_number": pending_registration.mobile_number.strip()},
+    )
+    return user
 
 
 def _mark_current_login_inactive(request):
@@ -191,6 +238,62 @@ def _get_mobile_number(user):
     return profile.mobile_number if profile and profile.mobile_number else "Not provided"
 
 
+def _extract_report_text(report_path):
+    suffix = Path(report_path).suffix.lower()
+    if suffix in {".txt", ".csv"}:
+        return Path(report_path).read_text(encoding="utf-8", errors="ignore")[:5000]
+    return ""
+
+
+def _build_analysis_trend(analyses_queryset):
+    analyses = list(analyses_queryset.order_by("created_at")[:7])
+    if not analyses:
+        return []
+
+    max_count = max((analysis.detected_conditions_count for analysis in analyses), default=1) or 1
+    trend = []
+    for analysis in analyses:
+        trend.append(
+            {
+                "label": timezone.localtime(analysis.created_at).strftime("%d %b"),
+                "count": analysis.detected_conditions_count,
+                "height": 34
+                if analysis.detected_conditions_count == 0
+                else 40 + int((analysis.detected_conditions_count / max_count) * 110),
+            }
+        )
+
+    return trend
+
+
+def _build_risk_distribution(analyses_queryset):
+    risk_counts = {"High": 0, "Medium": 0, "Low": 0}
+    for analysis in analyses_queryset:
+        if analysis.risk_level in risk_counts:
+            risk_counts[analysis.risk_level] += 1
+
+    max_count = max(risk_counts.values()) if risk_counts else 1
+    max_count = max_count or 1
+    return [
+        {
+            "label": label,
+            "count": count,
+            "width": max(12, int((count / max_count) * 100)) if count else 12,
+        }
+        for label, count in risk_counts.items()
+    ]
+
+
+def healthcheck_view(request):
+    return JsonResponse(
+        {
+            "status": "ok",
+            "application": "AI Medical Assistant",
+            "timestamp": timezone.now().isoformat(),
+        }
+    )
+
+
 def index(request):
     ensure_demo_setup()
 
@@ -199,12 +302,17 @@ def index(request):
     audio_url = ""
     error_message = ""
     submitted_symptoms = ""
+    submitted_report_notes = ""
+    report_summary = ""
+    latest_analysis = None
     featured_images = FeaturedImage.objects.filter(is_active=True)
 
     if request.method == "POST":
         image = request.FILES.get("image")
         audio = request.FILES.get("audio")
+        report_file = request.FILES.get("report_file")
         submitted_symptoms = (request.POST.get("symptoms") or "").strip()
+        submitted_report_notes = (request.POST.get("report_notes") or "").strip()
         language = (request.POST.get("language") or "english").strip().lower()
 
         if submitted_symptoms:
@@ -212,6 +320,14 @@ def index(request):
 
         encoded_image = None
         mime_type = "image/jpeg"
+        report_text = submitted_report_notes
+        report_relative_path = ""
+        image_relative_path = ""
+        previous_analysis = (
+            MedicalAnalysis.objects.filter(user=request.user).first()
+            if request.user.is_authenticated
+            else None
+        )
 
         try:
             if audio:
@@ -229,14 +345,32 @@ def index(request):
                 image_filename = f"{uuid.uuid4()}{image_suffix}"
                 image_path = _save_uploaded_file(image, "clinical_images", image_filename)
                 encoded_image, mime_type = encode_image(image_path)
+                image_relative_path = _build_media_relative_path(image_path)
 
-            if speech_text or encoded_image:
+            if report_file:
+                report_suffix = Path(report_file.name).suffix.lower() or ".txt"
+                report_filename = f"{uuid.uuid4()}{report_suffix}"
+                saved_report_path = _save_uploaded_file(report_file, "medical_reports", report_filename)
+                report_relative_path = _build_media_relative_path(saved_report_path)
+                extracted_report_text = _extract_report_text(saved_report_path)
+                if extracted_report_text:
+                    report_text = "\n\n".join(part for part in [submitted_report_notes, extracted_report_text] if part)
+
+            if speech_text or encoded_image or report_text:
                 doctor_response = analyze_image_with_query(
-                    query=_build_summary_prompt(speech_text, language),
+                    query=_build_summary_prompt(
+                        "\n\n".join(part for part in [speech_text, report_text] if part),
+                        language,
+                    ),
                     encoded_image=encoded_image,
                     model=MEDICAL_MODEL,
                     mime_type=mime_type,
                 )
+                report_summary = doctor_response
+
+                analysis_source_text = "\n\n".join(part for part in [speech_text, report_text] if part)
+                report_insights = analyze_report_text(analysis_source_text)
+                image_insights = analyze_image_record(image_relative_path)
 
                 try:
                     audio_filename = f"{uuid.uuid4()}_response.mp3"
@@ -253,6 +387,41 @@ def index(request):
                     error_message = (
                         "The written response is ready, but voice playback could not be generated right now."
                     )
+
+                latest_analysis = MedicalAnalysis.objects.create(
+                    user=request.user if request.user.is_authenticated else None,
+                    title=f"Clinical Analysis {timezone.localtime().strftime('%d %b %Y %H:%M')}",
+                    symptoms_text=submitted_symptoms,
+                    transcription_text=speech_text if audio else "",
+                    report_text=report_text,
+                    report_file=report_relative_path,
+                    medical_image=image_relative_path,
+                    ai_summary=doctor_response,
+                    predicted_condition=(
+                        image_insights["predicted_condition"]
+                        if image_relative_path
+                        and report_insights["predicted_condition"] == "General review required"
+                        else report_insights["predicted_condition"]
+                    ),
+                    detected_conditions_count=report_insights["detected_conditions_count"]
+                    + (1 if image_relative_path else 0),
+                    risk_level=report_insights["risk_level"],
+                    confidence_score=max(
+                        report_insights["confidence_score"],
+                        image_insights["confidence_score"],
+                    ),
+                    progression_status="Baseline",
+                    model_source=(
+                        report_insights["model_source"]
+                        if report_insights["model_source"] == "trained-model"
+                        or image_insights["model_source"] != "trained-model"
+                        else image_insights["model_source"]
+                    ),
+                )
+
+                comparison = compare_analyses(latest_analysis, previous_analysis)
+                latest_analysis.progression_status = comparison["status"]
+                latest_analysis.save(update_fields=["progression_status"])
             else:
                 error_message = "Provide symptoms, a voice recording, or an image before running analysis."
         except Exception:
@@ -272,6 +441,9 @@ def index(request):
             "audio_url": audio_url,
             "error_message": error_message,
             "submitted_symptoms": submitted_symptoms,
+            "submitted_report_notes": submitted_report_notes,
+            "report_summary": report_summary,
+            "latest_analysis": latest_analysis,
             "featured_images": featured_images,
         },
     )
@@ -282,6 +454,19 @@ def dashboard_view(request):
     ensure_demo_setup()
 
     current_user_logins = request.user.login_activities.filter(is_active=True)
+    analysis_queryset = _get_analysis_queryset_for_user(request.user)
+    latest_analysis = analysis_queryset.first()
+    previous_analysis = analysis_queryset[1] if analysis_queryset.count() > 1 else None
+    analysis_comparison = compare_analyses(latest_analysis, previous_analysis)
+    recent_analyses = analysis_queryset[:5]
+    recent_treatments = (
+        TreatmentEntry.objects.select_related("analysis", "added_by")[:5]
+        if request.user.is_staff
+        else TreatmentEntry.objects.select_related("analysis", "added_by").filter(
+            analysis__user=request.user
+        )[:5]
+    )
+
     dashboard_stats = [
         {
             "label": "Registered users",
@@ -294,14 +479,14 @@ def dashboard_view(request):
             "helper": "Currently signed-in sessions across users",
         },
         {
-            "label": "Chat sessions",
-            "value": ChatSession.objects.count(),
-            "helper": "Conversations created in the assistant",
+            "label": "Medical analyses",
+            "value": MedicalAnalysis.objects.count(),
+            "helper": "Saved report and image analysis records",
         },
         {
-            "label": "Messages",
-            "value": ChatMessage.objects.count(),
-            "helper": "Total chat messages saved in history",
+            "label": "Treatments logged",
+            "value": TreatmentEntry.objects.count(),
+            "helper": "Doctor treatment actions captured in the audit log",
         },
     ]
 
@@ -320,6 +505,12 @@ def dashboard_view(request):
         "current_user_logins": current_user_logins,
         "login_chart_data": _build_login_chart_data(),
         "role_chart_data": _build_role_chart_data(),
+        "analysis_chart_data": _build_analysis_trend(analysis_queryset),
+        "risk_distribution": _build_risk_distribution(analysis_queryset),
+        "analysis_comparison": analysis_comparison,
+        "latest_analysis": latest_analysis,
+        "recent_analyses": recent_analyses,
+        "recent_treatments": recent_treatments,
         "user_rows": _build_user_rows() if request.user.is_staff else [],
     }
 
@@ -384,12 +575,14 @@ def chat_view(request):
         form = ChatForm()
 
     history = _serialize_history(session.messages.all().order_by("created_at"))
+    attachment_count = sum(1 for item in history if item["attachment_url"])
     return render(
         request,
         "chat.html",
         {
             "form": form,
             "history": history,
+            "attachment_count": attachment_count,
         },
     )
 
@@ -408,6 +601,84 @@ def history_view(request):
             "sessions": sessions,
             "selected_session": selected_session,
             "messages": messages_list,
+        },
+    )
+
+
+@login_required
+def analysis_detail_view(request, analysis_id):
+    queryset = _get_analysis_queryset_for_user(request.user)
+    analysis = get_object_or_404(queryset, pk=analysis_id)
+    treatment_form = TreatmentEntryForm(request.POST or None)
+
+    if request.method == "POST" and treatment_form.is_valid():
+        treatment_entry = treatment_form.save(commit=False)
+        treatment_entry.analysis = analysis
+        treatment_entry.added_by = request.user
+        treatment_entry.save()
+        messages.success(request, "Treatment entry saved successfully.")
+        return redirect("analysis_detail", analysis_id=analysis.id)
+
+    previous_analysis = (
+        MedicalAnalysis.objects.filter(user=analysis.user, created_at__lt=analysis.created_at).first()
+        if analysis.user
+        else None
+    )
+    comparison = compare_analyses(analysis, previous_analysis)
+
+    return render(
+        request,
+        "analysis_detail.html",
+        {
+            "analysis": analysis,
+            "comparison": comparison,
+            "treatment_form": treatment_form,
+            "treatments": analysis.treatments.all(),
+        },
+    )
+
+
+@login_required
+def treatment_entry_edit_view(request, analysis_id, treatment_id):
+    analysis = get_object_or_404(_get_analysis_queryset_for_user(request.user), pk=analysis_id)
+    treatment_entry = get_object_or_404(TreatmentEntry, pk=treatment_id, analysis=analysis)
+    form = TreatmentEntryForm(request.POST or None, instance=treatment_entry)
+
+    if request.method == "POST" and form.is_valid():
+        updated_entry = form.save(commit=False)
+        if not updated_entry.added_by:
+            updated_entry.added_by = request.user
+        updated_entry.save()
+        messages.success(request, "Treatment entry updated successfully.")
+        return redirect("analysis_detail", analysis_id=analysis.id)
+
+    return render(
+        request,
+        "treatment_entry_edit.html",
+        {
+            "analysis": analysis,
+            "treatment_entry": treatment_entry,
+            "form": form,
+        },
+    )
+
+
+@login_required
+def treatment_entry_delete_view(request, analysis_id, treatment_id):
+    analysis = get_object_or_404(_get_analysis_queryset_for_user(request.user), pk=analysis_id)
+    treatment_entry = get_object_or_404(TreatmentEntry, pk=treatment_id, analysis=analysis)
+
+    if request.method == "POST":
+        treatment_entry.delete()
+        messages.success(request, "Treatment entry deleted successfully.")
+        return redirect("analysis_detail", analysis_id=analysis.id)
+
+    return render(
+        request,
+        "treatment_entry_delete.html",
+        {
+            "analysis": analysis,
+            "treatment_entry": treatment_entry,
         },
     )
 
@@ -455,16 +726,103 @@ def register_view(request):
     form = RegisterForm(request.POST or None)
 
     if request.method == "POST" and form.is_valid():
-        user = form.save()
-        login(request, user)
-        messages.success(request, "Your account has been created successfully.")
-        return redirect("dashboard")
+        PendingRegistration.objects.filter(
+            Q(email__iexact=form.cleaned_data["email"])
+            | Q(mobile_number=form.cleaned_data["mobile_number"])
+        ).delete()
+        pending_registration = form.create_pending_registration()
+        try:
+            issue_registration_otp_challenge(pending_registration)
+        except Exception:
+            pending_registration.delete()
+            messages.error(
+                request,
+                "We could not send the OTP right now. Please check the delivery configuration and try again.",
+            )
+            return render(request, "register.html", {"form": form})
+        messages.success(
+            request,
+            "Verification OTPs have been sent to your email address and mobile number.",
+        )
+        return redirect("register_verify", token=pending_registration.verification_token)
 
     return render(
         request,
         "register.html",
         {
             "form": form,
+        },
+    )
+
+
+def register_verify_view(request, token):
+    ensure_demo_setup()
+
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+
+    pending_registration = get_object_or_404(PendingRegistration, verification_token=token)
+    form = RegistrationOTPForm(request.POST or None)
+
+    if request.method == "POST":
+        if "resend_otp" in request.POST:
+            try:
+                issue_registration_otp_challenge(pending_registration)
+            except Exception:
+                messages.error(
+                    request,
+                    "We could not resend the OTP right now. Please try again shortly.",
+                )
+                return redirect("register_verify", token=pending_registration.verification_token)
+            messages.info(request, "A new email and mobile OTP have been sent.")
+            return redirect("register_verify", token=pending_registration.verification_token)
+
+        if pending_registration.is_expired:
+            form.add_error(None, "The OTP has expired. Please resend a new verification code.")
+        elif pending_registration.verification_attempts >= settings.REGISTRATION_OTP_MAX_ATTEMPTS:
+            pending_registration.delete()
+            messages.error(
+                request,
+                "The maximum OTP verification attempts were reached. Please register again.",
+            )
+            return redirect("register")
+        elif form.is_valid():
+            pending_registration.verification_attempts += 1
+            pending_registration.save(update_fields=["verification_attempts", "updated_at"])
+
+            email_matches = pending_registration.matches_email_otp(form.cleaned_data["email_otp"])
+            mobile_matches = pending_registration.matches_mobile_otp(form.cleaned_data["mobile_otp"])
+
+            if not email_matches:
+                form.add_error("email_otp", "The email OTP is incorrect.")
+            if not mobile_matches:
+                form.add_error("mobile_otp", "The mobile OTP is incorrect.")
+
+            if email_matches and mobile_matches:
+                try:
+                    user = _create_user_from_pending_registration(pending_registration)
+                except ValueError as error:
+                    pending_registration.delete()
+                    messages.error(request, str(error))
+                    return redirect("register")
+
+                pending_registration.delete()
+                login(request, user)
+                messages.success(request, "Your account has been created successfully.")
+                return redirect("dashboard")
+
+    return render(
+        request,
+        "register_verify.html",
+        {
+            "form": form,
+            "pending_registration": pending_registration,
+            "otp_expiry_minutes": settings.REGISTRATION_OTP_EXPIRY_MINUTES,
+            "otp_demo_note": (
+                "In local development, email OTPs use the configured Django email backend and mobile OTPs are written to the server console."
+                if settings.DEBUG
+                else ""
+            ),
         },
     )
 

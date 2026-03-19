@@ -1,13 +1,26 @@
 {% extends 'base.html' %}
+{% load static %}
 
 {% block title %}Create Account{% endblock %}
 
 {% block content %}
     <section class="auth-wrapper">
         <div class="container">
+            <div class="auth-brand">
+                <img
+                    class="auth-logo"
+                    src="{% static 'img/medical-assistant-logo.svg' %}"
+                    alt="AI Medical Assistant logo"
+                >
+                <div>
+                    <p class="eyebrow">AI Medical Assistant</p>
+                    <p class="auth-brand-copy">Verified account onboarding</p>
+                </div>
+            </div>
+
             <p class="eyebrow">New Account</p>
             <h1>Create your workspace</h1>
-            <p class="auth-subtitle">Set up a secure account with profile details, dashboard access, and login tracking.</p>
+            <p class="auth-subtitle">Set up a secure account with profile details, dashboard access, login tracking, and OTP verification.</p>
 
             <form method="post" class="stack-form">
                 {% csrf_token %}
@@ -59,7 +72,7 @@
                     <div class="error">{{ form.password2.errors|striptags }}</div>
                 {% endif %}
 
-                <button type="submit">Create Account</button>
+                <button type="submit">Continue to OTP Verification</button>
             </form>
 
             <p class="auth-link">
