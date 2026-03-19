@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+
+{% block title %}Conversation History{% endblock %}
+
+{% block content %}
+    <section class="page-intro page-intro-compact">
+        <div>
+            <p class="eyebrow">Conversation History</p>
+            <h1>Review saved chat sessions.</h1>
+            <p>Open any prior conversation to revisit attachments, responses, and follow-up guidance.</p>
+        </div>
+    </section>
+
+    {% if sessions %}
+        <div class="history-grid">
+            <section class="history-list-panel">
+                <h2>Your Conversations</h2>
+                <ul class="history-sessions">
+                    {% for s in sessions %}
+                        <li class="session-item {% if selected_session and selected_session.id == s.id %}active{% endif %}">
+                            <a href="{% url 'history' %}?session_id={{ s.id }}">
+                                Session {{ s.id }} - {{ s.created_at|date:"M d, Y H:i" }}
+                            </a>
+                            <div class="session-count">{{ s.messages.count }} messages</div>
+                        </li>
+                    {% endfor %}
+                </ul>
+            </section>
+
+            <section class="history-detail-panel">
+                {% if selected_session %}
+                    <div class="session-header">
+                        <h2>Session {{ selected_session.id }}</h2>
+                        <small>Started {{ selected_session.created_at|date:"M d, Y H:i" }}</small>
+                    </div>
+
+                    <div class="history-messages">
+                        {% for msg in messages %}
+                            <article class="history-message {{ msg.role }}">
+                                <div class="meta">{{ msg.role|title }} &bull; {{ msg.created_at|date:"M d, H:i" }}</div>
+                                <div class="body">{{ msg.text|linebreaksbr }}</div>
+                                {% if msg.attachment %}
+                                    <div>
+                                        <a href="{{ msg.attachment.url }}" target="_blank" rel="noopener noreferrer">
+                                            View attachment
+                                        </a>
+                                    </div>
+                                {% endif %}
+                            </article>
+                        {% empty %}
+                            <div class="empty-state">
+                                <h3>No messages yet</h3>
+                                <p>This session exists, but there are no saved messages to display.</p>
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="empty-state">
+                        <h3>No session selected</h3>
+                        <p>Select a conversation from the list to inspect the details.</p>
+                    </div>
+                {% endif %}
+            </section>
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <h3>No chat sessions yet</h3>
+            <p>Start a conversation from the chat workspace to build your history.</p>
+        </div>
+    {% endif %}
+{% endblock %}

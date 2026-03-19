@@ -1,0 +1,43 @@
+# Virtual Environment
+aivenv/
+venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Django database
+db.sqlite3
+
+# Static generated files
+static/patient_audio.mp3
+static/uploaded_image.jpg
+static/final.mp3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+
+
+# .env
+# aivenv
+# __pycache__
+
+media/
+
+__pycache__/
+*.pyc
+db.sqlite3
+.env
+venv/
+media/
+staticfiles/

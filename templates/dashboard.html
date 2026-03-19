@@ -1,0 +1,182 @@
+{% extends 'base.html' %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+    <section class="page-intro">
+        <div>
+            <p class="eyebrow">Dashboard Overview</p>
+            <h1>Monitor users, devices, and platform activity.</h1>
+            <p>
+                Review active sign-ins, current device locations, engagement metrics, and user-management actions from one dashboard.
+            </p>
+        </div>
+    </section>
+
+    <div class="stats-grid">
+        {% for item in dashboard_stats %}
+            <article class="stat-card">
+                <p class="stat-label">{{ item.label }}</p>
+                <h2>{{ item.value }}</h2>
+                <p class="stat-helper">{{ item.helper }}</p>
+            </article>
+        {% endfor %}
+    </div>
+
+    <div class="dashboard-grid">
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Your Session Overview</h2>
+                    <p class="card-sub">Current sign-in footprint for your account.</p>
+                </div>
+            </div>
+
+            <div class="profile-summary">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Member Name</span>
+                    <strong>{{ current_user_summary.display_name }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">User ID</span>
+                    <strong>{{ current_user_summary.user_id }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Role</span>
+                    <strong>{{ current_user_summary.role }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Mobile</span>
+                    <strong>{{ current_user_summary.mobile_number }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Active Devices</span>
+                    <strong>{{ current_user_summary.device_count }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Current Locations</span>
+                    <strong>{{ current_user_summary.locations|join:", " }}</strong>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Login Activity</h2>
+                    <p class="card-sub">Seven-day sign-in trend across the platform.</p>
+                </div>
+            </div>
+
+            <div class="bar-chart">
+                {% for point in login_chart_data %}
+                    <div class="bar-column">
+                        <span class="bar-value">{{ point.count }}</span>
+                        <div class="bar-track">
+                            <div class="bar-fill" style="height: {{ point.height }}px;"></div>
+                        </div>
+                        <span class="bar-label">{{ point.label }}</span>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Role Distribution</h2>
+                    <p class="card-sub">Current split between administrative and member accounts.</p>
+                </div>
+            </div>
+
+            <div class="progress-list">
+                {% for point in role_chart_data %}
+                    <div class="progress-item">
+                        <div class="progress-meta">
+                            <span>{{ point.label }}</span>
+                            <strong>{{ point.count }}</strong>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-fill" style="width: {{ point.width }}%;"></div>
+                        </div>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Current Login Locations</h2>
+                    <p class="card-sub">Devices currently active under your account.</p>
+                </div>
+            </div>
+
+            <div class="session-list">
+                {% for activity in current_user_logins %}
+                    <article class="session-card">
+                        <strong>{{ activity.device_name }}</strong>
+                        <span>{{ activity.browser_name }} &bull; {{ activity.location_label }}</span>
+                        <small>Last seen {{ activity.last_seen|date:"M d, Y H:i" }}</small>
+                    </article>
+                {% empty %}
+                    <div class="empty-state">
+                        <h3>No active sessions found</h3>
+                        <p>Your dashboard will list devices after authenticated activity is recorded.</p>
+                    </div>
+                {% endfor %}
+            </div>
+        </section>
+    </div>
+
+    {% if user.is_staff %}
+        <section class="card management-card">
+            <div class="card-header">
+                <div>
+                    <h2>User Management</h2>
+                    <p class="card-sub">Review members, roles, status, current devices, and account actions.</p>
+                </div>
+            </div>
+
+            <div class="table-wrapper">
+                <table class="dashboard-table">
+                    <thead>
+                        <tr>
+                            <th>Member Name / User ID</th>
+                            <th>Role</th>
+                            <th>Status</th>
+                            <th>Devices</th>
+                            <th>Locations</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in user_rows %}
+                            <tr>
+                                <td>
+                                    <strong>{{ row.display_name }}</strong>
+                                    <div class="table-subtext">{{ row.user_id }}</div>
+                                </td>
+                                <td>{{ row.role }}</td>
+                                <td>
+                                    <span class="status-pill {% if row.status == 'Online' %}online{% else %}offline{% endif %}">
+                                        {{ row.status }}
+                                    </span>
+                                </td>
+                                <td>{{ row.device_count }}</td>
+                                <td>{{ row.locations|join:", " }}</td>
+                                <td>
+                                    <div class="action-links">
+                                        <a href="{{ row.view_url }}">View</a>
+                                        <a href="{{ row.edit_url }}">Edit</a>
+                                        <a href="{{ row.delete_url }}">Delete</a>
+                                    </div>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endif %}
+{% endblock %}

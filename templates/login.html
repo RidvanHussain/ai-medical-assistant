@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+
+{% block title %}Sign In{% endblock %}
+
+{% block content %}
+    <section class="auth-wrapper">
+        <div class="container">
+            <p class="eyebrow">Welcome Back</p>
+            <h1>Sign in to your account</h1>
+            <p class="auth-subtitle">Access the dashboard, saved conversations, user activity, and account settings.</p>
+
+            <form method="post" class="stack-form">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{{ next }}">
+
+                {% if form.non_field_errors %}
+                    <div class="error">{{ form.non_field_errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ form.login_id.id_for_label }}">Email ID / User ID</label>
+                {{ form.login_id }}
+                {% if form.login_id.errors %}
+                    <div class="error">{{ form.login_id.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ form.password.id_for_label }}">Password</label>
+                {{ form.password }}
+                {% if form.password.errors %}
+                    <div class="error">{{ form.password.errors|striptags }}</div>
+                {% endif %}
+
+                <button type="submit">Sign In</button>
+            </form>
+
+            <p class="auth-link">
+                Need an account? <a href="{% url 'register' %}">Create one</a>
+            </p>
+            <p class="help-text">Demo admin credentials: Admin / Admin123</p>
+        </div>
+    </section>
+{% endblock %}

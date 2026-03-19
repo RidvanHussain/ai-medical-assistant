@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+
+{% block title %}Account Settings{% endblock %}
+
+{% block content %}
+    <section class="page-intro page-intro-compact">
+        <div>
+            <p class="eyebrow">Account Settings</p>
+            <h1>Manage your credentials.</h1>
+            <p>Update your profile details, email ID, mobile number, and password from one place.</p>
+        </div>
+    </section>
+
+    <div class="account-grid">
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Profile Details</h2>
+                    <p class="card-sub">Keep your member information current for dashboard visibility and login management.</p>
+                </div>
+            </div>
+
+            <form method="post" class="stack-form">
+                {% csrf_token %}
+                <input type="hidden" name="form_type" value="profile">
+
+                <label for="{{ profile_form.first_name.id_for_label }}">First Name</label>
+                {{ profile_form.first_name }}
+                {% if profile_form.first_name.errors %}
+                    <div class="error">{{ profile_form.first_name.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ profile_form.last_name.id_for_label }}">Last Name</label>
+                {{ profile_form.last_name }}
+                {% if profile_form.last_name.errors %}
+                    <div class="error">{{ profile_form.last_name.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ profile_form.email.id_for_label }}">Email ID</label>
+                {{ profile_form.email }}
+                {% if profile_form.email.errors %}
+                    <div class="error">{{ profile_form.email.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ profile_form.mobile_number.id_for_label }}">Mobile Number</label>
+                {{ profile_form.mobile_number }}
+                {% if profile_form.mobile_number.errors %}
+                    <div class="error">{{ profile_form.mobile_number.errors|striptags }}</div>
+                {% endif %}
+
+                <button type="submit">Update Profile</button>
+            </form>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Password</h2>
+                    <p class="card-sub">Choose a strong password and keep this session signed in.</p>
+                </div>
+            </div>
+
+            <form method="post" class="stack-form">
+                {% csrf_token %}
+                <input type="hidden" name="form_type" value="password">
+
+                <label for="{{ password_form.old_password.id_for_label }}">Current Password</label>
+                {{ password_form.old_password }}
+                {% if password_form.old_password.errors %}
+                    <div class="error">{{ password_form.old_password.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ password_form.new_password1.id_for_label }}">New Password</label>
+                {{ password_form.new_password1 }}
+                {% if password_form.new_password1.errors %}
+                    <div class="error">{{ password_form.new_password1.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ password_form.new_password2.id_for_label }}">Confirm New Password</label>
+                {{ password_form.new_password2 }}
+                {% if password_form.new_password2.errors %}
+                    <div class="error">{{ password_form.new_password2.errors|striptags }}</div>
+                {% endif %}
+
+                <button type="submit">Update Password</button>
+            </form>
+        </section>
+    </div>
+{% endblock %}

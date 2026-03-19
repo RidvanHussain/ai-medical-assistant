@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    {% load static %}
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta
+        name="description"
+        content="AI Medical Assistant for symptom intake, image review, and follow-up patient conversations."
+    >
+    <title>{% block title %}AI Medical Assistant{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+</head>
+<body>
+    <div class="app-shell">
+        <header class="header">
+            <a class="brand" href="{% url 'index' %}">
+                <span class="brand-mark" aria-hidden="true">AM</span>
+                <span class="brand-copy">
+                    <span class="brand-title">AI Medical Assistant</span>
+                    <span class="brand-subtitle">Pre-screening workspace</span>
+                </span>
+            </a>
+
+            <nav aria-label="Primary navigation">
+                <a href="{% url 'index' %}">Home</a>
+                {% if user.is_authenticated %}
+                    <a href="{% url 'dashboard' %}">Dashboard</a>
+                    <a href="{% url 'chat' %}">Chat</a>
+                    <a href="{% url 'history' %}">History</a>
+                    <div class="nav-account">
+                        <a class="account-pill" href="{% url 'change_credentials' %}">
+                            <span class="user-icon" aria-hidden="true">{{ user.username|first|upper }}</span>
+                            <span class="account-copy">
+                                <span class="account-label">Signed in</span>
+                                <span class="username">{{ user.get_full_name|default:user.email|default:user.username }}</span>
+                            </span>
+                        </a>
+                        <a class="logout-link" href="{% url 'logout' %}">Logout</a>
+                    </div>
+                {% else %}
+                    <a href="{% url 'chat' %}">Chat</a>
+                    <a href="{% url 'login' %}">Login</a>
+                    <a href="{% url 'register' %}">Register</a>
+                {% endif %}
+                <button
+                    class="settings-btn"
+                    type="button"
+                    onclick="toggleSettings(event)"
+                    aria-label="Open display settings"
+                >
+                    Preferences
+                </button>
+            </nav>
+        </header>
+
+        <aside class="settings-panel" id="settings" aria-label="Display settings">
+            <section>
+                <label for="theme-select"><strong>Theme</strong></label>
+                <select id="theme-select" onchange="changeTheme(this.value)">
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                </select>
+            </section>
+            <section class="settings-section">
+                <label for="language-select"><strong>Response Language</strong></label>
+                <select id="language-select" name="language" form="mainForm">
+                    <option value="english">English</option>
+                    <option value="hindi">Hindi</option>
+                    <option value="urdu">Urdu</option>
+                    <option value="arabic">Arabic</option>
+                    <option value="bengali">Bengali</option>
+                </select>
+            </section>
+        </aside>
+
+        {% if messages %}
+            <div class="flash-stack" aria-live="polite">
+                {% for message in messages %}
+                    <div class="flash flash-{{ message.tags|default:'info' }}">{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+
+        <main class="main-content">
+            {% block content %}{% endblock %}
+        </main>
+    </div>
+
+    <script src="{% static 'js/main.js' %}"></script>
+</body>
+</html>

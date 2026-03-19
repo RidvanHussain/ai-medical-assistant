@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+
+{% block title %}Patient Chat{% endblock %}
+
+{% block content %}
+    <section class="page-intro page-intro-compact">
+        <div>
+            <p class="eyebrow">Follow-up Chat</p>
+            <h1>Continue the conversation with the medical assistant.</h1>
+            <p>
+                Ask follow-up questions, clarify symptoms, and keep attachments together with the conversation history.
+            </p>
+        </div>
+    </section>
+
+    <div class="cards-grid">
+        <section class="card wide">
+            <div class="card-header">
+                <div>
+                    <h2>Conversation</h2>
+                    <p class="card-sub">Review previous messages and continue the thread.</p>
+                </div>
+            </div>
+
+            <div class="chat-messages" id="chatBox">
+                {% if history %}
+                    {% for item in history %}
+                        <article class="message {{ item.role }}">
+                            <div class="meta">
+                                {{ item.role|title }}{% if item.timestamp %} &bull; {{ item.timestamp }}{% endif %}
+                            </div>
+                            <div class="text">{{ item.text|default:"(no text)"|linebreaksbr }}</div>
+
+                            {% if item.attachment_url %}
+                                <a
+                                    class="attachment-link"
+                                    href="{{ item.attachment_url }}"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                >
+                                    View attachment
+                                </a>
+                            {% endif %}
+                        </article>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">
+                        <h3>No conversation yet</h3>
+                        <p>Start with symptoms, medications, or questions about likely next steps.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Send a Message</h2>
+                    <p class="card-sub">Image attachments can be analyzed. PDF files are stored with the conversation.</p>
+                </div>
+            </div>
+
+            <form method="post" enctype="multipart/form-data" class="chat-form">
+                {% csrf_token %}
+
+                {% if form.non_field_errors %}
+                    <div class="error">{{ form.non_field_errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ form.message.id_for_label }}">Message</label>
+                {{ form.message }}
+                {% if form.message.errors %}
+                    <div class="error">{{ form.message.errors|striptags }}</div>
+                {% endif %}
+
+                <label for="{{ form.attachment.id_for_label }}">Attachment</label>
+                {{ form.attachment }}
+                <p class="field-note">Accepted formats: JPG, JPEG, PNG, or PDF up to 5 MB.</p>
+                {% if form.attachment.errors %}
+                    <div class="error">{{ form.attachment.errors|striptags }}</div>
+                {% endif %}
+
+                <button type="submit">Send Message</button>
+            </form>
+        </section>
+    </div>
+{% endblock %}
