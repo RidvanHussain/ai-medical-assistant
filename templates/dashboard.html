@@ -118,8 +118,8 @@
                     <strong>{{ analysis_comparison.status }}</strong>
                 </div>
                 <div class="profile-summary-item">
-                    <span class="summary-label">Condition Delta</span>
-                    <strong>{{ analysis_comparison.delta }}</strong>
+                    <span class="summary-label">{{ analysis_comparison.metric_label|default:"Condition Delta" }}</span>
+                    <strong>{{ analysis_comparison.delta_label|default:analysis_comparison.delta }}</strong>
                 </div>
                 <div class="profile-summary-item">
                     <span class="summary-label">Latest Record</span>
@@ -155,6 +155,83 @@
                         <p>Run clinical analyses from the home page to start tracking progression.</p>
                     </div>
                 {% endfor %}
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header">
+                <div>
+                    <h2>Model Training Pipeline</h2>
+                    <p class="card-sub">Doctor-reviewed treatment records being curated for future ML model updates.</p>
+                </div>
+            </div>
+
+            <div class="profile-summary">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Dataset Records</span>
+                    <strong>{{ training_dataset_summary.record_count }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Approved for Training</span>
+                    <strong>{{ training_dataset_summary.approved_count }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Average Quality</span>
+                    <strong>{{ training_dataset_summary.average_quality }}/100</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Latest Sync</span>
+                    <strong>
+                        {% if training_dataset_summary.latest_synced_at %}
+                            {{ training_dataset_summary.latest_synced_at|date:"M d, Y H:i" }}
+                        {% else %}
+                            No sync yet
+                        {% endif %}
+                    </strong>
+                </div>
+            </div>
+
+            <div class="profile-summary training-evaluation-grid">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Evaluation Split</span>
+                    <strong>
+                        {% if model_evaluation_summary %}
+                            {{ model_evaluation_summary.train_count }} train / {{ model_evaluation_summary.test_count }} test
+                        {% else %}
+                            80% train / 20% test
+                        {% endif %}
+                    </strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Accuracy</span>
+                    <strong>
+                        {% if model_evaluation_summary %}
+                            {{ model_evaluation_summary.accuracy_percent }}%
+                        {% else %}
+                            Not evaluated yet
+                        {% endif %}
+                    </strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Evaluation Time</span>
+                    <strong>
+                        {% if model_evaluation_summary and model_evaluation_summary.evaluated_at_datetime %}
+                            {{ model_evaluation_summary.evaluated_at_datetime|date:"M d, Y H:i" }}
+                        {% else %}
+                            Awaiting enough approved records
+                        {% endif %}
+                    </strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Test Records</span>
+                    <strong>
+                        {% if model_evaluation_summary %}
+                            {{ model_evaluation_summary.correct_predictions }}/{{ model_evaluation_summary.test_count }} correct
+                        {% else %}
+                            Add more reviewed cases
+                        {% endif %}
+                    </strong>
+                </div>
             </div>
         </section>
 
@@ -228,23 +305,22 @@
         <section class="card">
             <div class="card-header">
                 <div>
-                    <h2>Treatment Audit Trail</h2>
-                    <p class="card-sub">Recent treatment entries with doctor and audit details.</p>
+                    <h2>Treatment Knowledge Feed</h2>
+                    <p class="card-sub">Privacy-safe summaries from doctor-reviewed treatments currently contributing to ML training.</p>
                 </div>
             </div>
 
             <div class="session-list">
-                {% for treatment in recent_treatments %}
+                {% for treatment in public_treatment_summaries %}
                     <article class="session-card">
-                        <strong>{{ treatment.doctor_name }} ({{ treatment.specialization }})</strong>
-                        <span>Doctor ID: {{ treatment.doctor_id }}{% if treatment.contact_details %} &bull; {{ treatment.contact_details }}{% endif %}</span>
-                        <span>Added by {{ treatment.added_by.get_full_name|default:treatment.added_by.username|default:"System" }}</span>
-                        <small>{{ treatment.created_at|date:"M d, Y H:i" }}</small>
+                        <strong>{{ treatment.condition }} ({{ treatment.specialization }})</strong>
+                        <span>{{ treatment.summary }}</span>
+                        <small>Training quality {{ treatment.quality_score }}/100 &bull; {{ treatment.updated_at|date:"M d, Y H:i" }}</small>
                     </article>
                 {% empty %}
                     <div class="empty-state">
-                        <h3>No treatments logged yet</h3>
-                        <p>Open a saved analysis record to start entering doctor treatment decisions.</p>
+                        <h3>No treatment summaries available yet</h3>
+                        <p>Once doctors add reviewed treatment entries, privacy-safe summaries will appear here for all users.</p>
                     </div>
                 {% endfor %}
             </div>

@@ -38,6 +38,16 @@
                     <strong>{{ analysis.confidence_score|floatformat:2 }}</strong>
                 </div>
                 <div class="profile-summary-item">
+                    <span class="summary-label">Disease Level</span>
+                    <strong>
+                        {% if analysis.disease_percentage != None %}
+                            {{ analysis.disease_percentage|floatformat:0 }}%
+                        {% else %}
+                            Not identified
+                        {% endif %}
+                    </strong>
+                </div>
+                <div class="profile-summary-item">
                     <span class="summary-label">Progression Status</span>
                     <strong>{{ analysis.progression_status }}</strong>
                 </div>
@@ -87,8 +97,8 @@
                     <strong>{{ comparison.status }}</strong>
                 </div>
                 <div class="profile-summary-item">
-                    <span class="summary-label">Condition Delta</span>
-                    <strong>{{ comparison.delta }}</strong>
+                    <span class="summary-label">{{ comparison.metric_label|default:"Condition Delta" }}</span>
+                    <strong>{{ comparison.delta_label|default:comparison.delta }}</strong>
                 </div>
                 <div class="profile-summary-item profile-summary-wide">
                     <span class="summary-label">Clinical Interpretation</span>
@@ -96,9 +106,59 @@
                 </div>
             </div>
 
+            {% if percentage_comparison %}
+                <div class="comparison-visual-grid comparison-visual-grid-compact">
+                    <div class="comparison-pie-wrap">
+                        <div
+                            class="comparison-pie"
+                            style="--comparison-fill: {{ percentage_comparison.chart_fill_degrees }}deg;"
+                            aria-label="Disease reduction versus remaining percentage"
+                        >
+                            <div class="comparison-pie-center">
+                                <strong>{{ percentage_comparison.current_percentage|floatformat:0 }}%</strong>
+                                <span>Current level</span>
+                            </div>
+                        </div>
+
+                        <div class="comparison-legend">
+                            <div class="comparison-legend-item">
+                                <span class="comparison-swatch comparison-swatch-change"></span>
+                                <span>{{ percentage_comparison.change_label }}: {{ percentage_comparison.change_percentage|floatformat:0 }}%</span>
+                            </div>
+                            <div class="comparison-legend-item">
+                                <span class="comparison-swatch comparison-swatch-remaining"></span>
+                                <span>Remaining: {{ percentage_comparison.remaining_percentage|floatformat:0 }}%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="profile-summary">
+                        <div class="profile-summary-item">
+                            <span class="summary-label">Previous Report</span>
+                            <strong>{{ percentage_comparison.previous_percentage|floatformat:0 }}%</strong>
+                        </div>
+                        <div class="profile-summary-item">
+                            <span class="summary-label">Current Report</span>
+                            <strong>{{ percentage_comparison.current_percentage|floatformat:0 }}%</strong>
+                        </div>
+                        <div class="profile-summary-item">
+                            <span class="summary-label">{{ percentage_comparison.change_label }}</span>
+                            <strong>{{ percentage_comparison.change_percentage|floatformat:0 }}%</strong>
+                        </div>
+                        <div class="profile-summary-item">
+                            <span class="summary-label">Remaining</span>
+                            <strong>{{ percentage_comparison.remaining_percentage|floatformat:0 }}%</strong>
+                        </div>
+                    </div>
+                </div>
+            {% endif %}
+
             <div class="stack analysis-assets">
                 {% if analysis.report_file %}
                     <a href="{{ analysis.report_file.url }}" target="_blank" rel="noopener noreferrer">Open Uploaded Report</a>
+                {% endif %}
+                {% if analysis.previous_report_file %}
+                    <a href="{{ analysis.previous_report_file.url }}" target="_blank" rel="noopener noreferrer">Open Previous Comparison Report</a>
                 {% endif %}
                 {% if analysis.medical_image %}
                     <a href="{{ analysis.medical_image.url }}" target="_blank" rel="noopener noreferrer">Open Uploaded Image</a>
@@ -118,6 +178,10 @@
 
             <form method="post" class="stack-form">
                 {% csrf_token %}
+
+                <div class="info-banner">
+                    Doctor-reviewed treatments are automatically converted into structured training records for future ML model updates.
+                </div>
 
                 <label for="{{ treatment_form.doctor_name.id_for_label }}">Doctor Name</label>
                 {{ treatment_form.doctor_name }}
@@ -167,6 +231,13 @@
                         <strong>{{ treatment.doctor_name }} ({{ treatment.specialization }})</strong>
                         <span>Doctor ID: {{ treatment.doctor_id }}{% if treatment.contact_details %} &bull; {{ treatment.contact_details }}{% endif %}</span>
                         <span>{{ treatment.treatment_notes|linebreaksbr }}</span>
+                        {% if treatment.training_record %}
+                            <span>
+                                Training dataset synced:
+                                {{ treatment.training_record.target_condition }}
+                                &bull; quality {{ treatment.training_record.quality_score }}/100
+                            </span>
+                        {% endif %}
                         <small>
                             Added by {{ treatment.added_by.get_full_name|default:treatment.added_by.username|default:"System" }}
                             on {{ treatment.created_at|date:"M d, Y H:i" }}

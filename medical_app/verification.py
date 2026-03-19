@@ -37,6 +37,35 @@ def _build_mobile_message(first_name, code):
     )
 
 
+def normalize_mobile_number_for_sms(mobile_number):
+    raw_value = (mobile_number or "").strip()
+    if not raw_value:
+        raise RuntimeError("A mobile number is required for OTP delivery.")
+
+    if raw_value.startswith("+"):
+        normalized_digits = "".join(character for character in raw_value if character.isdigit())
+        return f"+{normalized_digits}"
+
+    digits = "".join(character for character in raw_value if character.isdigit())
+    if not digits:
+        raise RuntimeError("A valid mobile number is required for OTP delivery.")
+
+    country_code = (settings.DEFAULT_PHONE_COUNTRY_CODE or "").strip()
+    if country_code:
+        if not country_code.startswith("+"):
+            country_code = f"+{country_code}"
+
+        country_digits = country_code.lstrip("+")
+        if digits.startswith(country_digits):
+            return f"+{digits}"
+        return f"{country_code}{digits}"
+
+    if len(digits) < 10:
+        raise RuntimeError("The mobile number is incomplete and could not be normalized for SMS delivery.")
+
+    return f"+{digits}"
+
+
 def send_email_otp(recipient_email, first_name, code):
     send_mail(
         subject="Verify your AI Medical Assistant email",
@@ -49,9 +78,10 @@ def send_email_otp(recipient_email, first_name, code):
 
 def send_mobile_otp(mobile_number, first_name, code):
     sms_message = _build_mobile_message(first_name, code)
+    normalized_mobile_number = normalize_mobile_number_for_sms(mobile_number)
 
     if settings.SMS_BACKEND == "console":
-        logger.warning("SMS OTP to %s: %s", mobile_number, sms_message)
+        logger.warning("SMS OTP to %s: %s", normalized_mobile_number, sms_message)
         return
 
     if settings.SMS_BACKEND == "twilio":
@@ -65,7 +95,7 @@ def send_mobile_otp(mobile_number, first_name, code):
         response = httpx.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Messages.json",
             data={
-                "To": mobile_number,
+                "To": normalized_mobile_number,
                 "From": settings.TWILIO_FROM_NUMBER,
                 "Body": sms_message,
             },

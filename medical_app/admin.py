@@ -8,6 +8,7 @@ from .models import (
     MedicalAnalysis,
     PendingRegistration,
     TreatmentEntry,
+    TreatmentTrainingRecord,
     UserProfile,
 )
 
@@ -117,3 +118,26 @@ class TreatmentEntryAdmin(admin.ModelAdmin):
         "analysis__title",
     )
     ordering = ("-created_at",)
+
+
+@admin.register(TreatmentTrainingRecord)
+class TreatmentTrainingRecordAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "treatment",
+        "target_condition",
+        "target_specialization",
+        "quality_score",
+        "is_approved",
+        "updated_at",
+    )
+    list_filter = ("is_approved", "source_type", "target_condition", "target_specialization")
+    search_fields = (
+        "target_condition",
+        "target_specialization",
+        "target_treatment",
+        "input_text",
+        "treatment__doctor_name",
+        "analysis__title",
+    )
+    ordering = ("-updated_at",)

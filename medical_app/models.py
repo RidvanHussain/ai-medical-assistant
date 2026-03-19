@@ -123,12 +123,18 @@ class MedicalAnalysis(models.Model):
     transcription_text = models.TextField(blank=True)
     report_text = models.TextField(blank=True)
     report_file = models.FileField(upload_to="medical_reports/", blank=True, null=True)
+    previous_report_text = models.TextField(blank=True)
+    previous_report_file = models.FileField(upload_to="medical_reports/", blank=True, null=True)
     medical_image = models.FileField(upload_to="analysis_images/", blank=True, null=True)
     ai_summary = models.TextField(blank=True)
     predicted_condition = models.CharField(max_length=120, blank=True)
     detected_conditions_count = models.PositiveIntegerField(default=0)
     risk_level = models.CharField(max_length=32, blank=True)
     confidence_score = models.FloatField(default=0)
+    disease_percentage = models.FloatField(blank=True, null=True)
+    previous_disease_percentage = models.FloatField(blank=True, null=True)
+    percentage_reduced = models.FloatField(blank=True, null=True)
+    percentage_remaining = models.FloatField(blank=True, null=True)
     progression_status = models.CharField(max_length=40, blank=True)
     model_source = models.CharField(max_length=40, default="heuristic")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -166,6 +172,37 @@ class TreatmentEntry(models.Model):
 
     def __str__(self):
         return f"{self.doctor_name} - {self.analysis_id}"
+
+
+class TreatmentTrainingRecord(models.Model):
+    treatment = models.OneToOneField(
+        TreatmentEntry,
+        related_name="training_record",
+        on_delete=models.CASCADE,
+    )
+    analysis = models.ForeignKey(
+        MedicalAnalysis,
+        related_name="training_records",
+        on_delete=models.CASCADE,
+    )
+    source_type = models.CharField(max_length=40, default="doctor_reviewed_case")
+    input_text = models.TextField()
+    ai_context = models.TextField(blank=True)
+    target_condition = models.CharField(max_length=120, blank=True)
+    target_specialization = models.CharField(max_length=150, blank=True)
+    target_treatment = models.TextField()
+    feature_snapshot = models.JSONField(default=dict, blank=True)
+    quality_score = models.PositiveSmallIntegerField(default=0)
+    is_approved = models.BooleanField(default=True)
+    review_notes = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-updated_at",)
+
+    def __str__(self):
+        return f"Training record for treatment {self.treatment_id}"
 
 
 class ChatSession(models.Model):

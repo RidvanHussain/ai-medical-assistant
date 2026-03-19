@@ -1,10 +1,15 @@
+import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
+from .analysis_engine import analyze_report_text
+from .model_evaluation import load_evaluation_report
 from .models import (
     ChatMessage,
     FeaturedImage,
@@ -12,6 +17,7 @@ from .models import (
     MedicalAnalysis,
     PendingRegistration,
     TreatmentEntry,
+    TreatmentTrainingRecord,
     UserProfile,
 )
 
@@ -184,6 +190,44 @@ class DashboardTests(TestCase):
             browser_name="Google Chrome",
             is_active=True,
         )
+        self.member_user = user_model.objects.create_user(
+            username="member_user",
+            email="member@example.com",
+            first_name="Member",
+            last_name="Viewer",
+            password="SecurePass123!",
+        )
+        UserProfile.objects.update_or_create(
+            user=self.member_user,
+            defaults={"mobile_number": "8887776665"},
+        )
+        self.patient_owner = user_model.objects.create_user(
+            username="case_owner",
+            email="case_owner@example.com",
+            first_name="Case",
+            last_name="Owner",
+            password="SecurePass123!",
+        )
+        analysis = MedicalAnalysis.objects.create(
+            user=self.patient_owner,
+            title="Eye Comfort Review",
+            predicted_condition="Visual review suggested",
+            report_text="Eye redness and irritation were noted after dust exposure.",
+            risk_level="Low",
+        )
+        TreatmentEntry.objects.create(
+            analysis=analysis,
+            doctor_name="Dr. Private Detail",
+            doctor_id="DOC-909",
+            specialization="Eye Specialist",
+            contact_details="555-9090",
+            treatment_notes=(
+                "Rinse the eye gently with sterile saline and use lubricating drops twice daily. "
+                "Avoid rubbing the eye and reduce screen exposure for the next 48 hours. "
+                "Return for review if pain or discharge worsens."
+            ),
+            added_by=self.admin_user,
+        )
 
     def test_dashboard_requires_login(self):
         response = self.client.get(reverse("dashboard"))
@@ -199,6 +243,19 @@ class DashboardTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "User Management")
         self.assertContains(response, "Admin Manager")
+
+    def test_member_dashboard_shows_shared_treatment_summary_without_private_details(self):
+        self.client.login(username="member_user", password="SecurePass123!")
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Treatment Knowledge Feed")
+        self.assertContains(response, "Eye Specialist")
+        self.assertContains(response, "Rinse the eye gently with sterile saline")
+        self.assertNotContains(response, "Dr. Private Detail")
+        self.assertNotContains(response, "DOC-909")
+        self.assertNotContains(response, "555-9090")
 
 
 class ClinicalAnalysisTests(TestCase):
@@ -239,6 +296,34 @@ class ClinicalAnalysisTests(TestCase):
         self.assertEqual(analysis.ai_summary, "Structured clinical summary.")
         mock_tts.assert_called_once()
 
+    @patch("medical_app.views.text_to_speech_with_edge")
+    @patch("medical_app.views.analyze_image_with_query", return_value="Structured disease comparison summary.")
+    def test_index_can_compare_previous_and_current_reports_with_percentage_chart(self, mock_ai, mock_tts):
+        self.client.login(username="doctor_user", password="SecurePass123!")
+
+        response = self.client.post(
+            reverse("index"),
+            {
+                "report_notes": "Current report shows disease burden at 30% with improved response to treatment.",
+                "previous_report_notes": "Previous report recorded disease burden at 80% before treatment was started.",
+                "language": "english",
+            },
+            follow=True,
+        )
+
+        analysis = MedicalAnalysis.objects.get(user=self.user)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Disease Burden Comparison")
+        self.assertContains(response, "Reduced")
+        self.assertContains(response, "Remaining")
+        self.assertEqual(analysis.disease_percentage, 30.0)
+        self.assertEqual(analysis.previous_disease_percentage, 80.0)
+        self.assertEqual(analysis.percentage_reduced, 50.0)
+        self.assertEqual(analysis.percentage_remaining, 30.0)
+        self.assertEqual(analysis.progression_status, "Improved")
+        mock_tts.assert_called_once()
+
     def test_analysis_detail_requires_login(self):
         analysis = MedicalAnalysis.objects.create(
             user=self.user,
@@ -273,9 +358,16 @@ class ClinicalAnalysisTests(TestCase):
         )
 
         treatment_entry = TreatmentEntry.objects.get(analysis=analysis)
+        training_record = TreatmentTrainingRecord.objects.get(treatment=treatment_entry)
 
         self.assertEqual(create_response.status_code, 200)
-        self.assertContains(create_response, "Treatment entry saved successfully.")
+        self.assertContains(
+            create_response,
+            "Treatment entry saved successfully and synced to the ML training dataset.",
+        )
+        self.assertEqual(training_record.target_condition, "Respiratory")
+        self.assertEqual(training_record.target_specialization, "Pulmonology")
+        self.assertGreater(training_record.quality_score, 0)
 
         edit_response = self.client.post(
             reverse("treatment_entry_edit", args=[analysis.id, treatment_entry.id]),
@@ -290,8 +382,10 @@ class ClinicalAnalysisTests(TestCase):
         )
 
         treatment_entry.refresh_from_db()
+        training_record.refresh_from_db()
         self.assertEqual(edit_response.status_code, 200)
         self.assertEqual(treatment_entry.treatment_notes, "Updated follow-up after inhaler review.")
+        self.assertEqual(training_record.target_treatment, "Updated follow-up after inhaler review.")
 
         delete_response = self.client.post(
             reverse("treatment_entry_delete", args=[analysis.id, treatment_entry.id]),
@@ -300,6 +394,119 @@ class ClinicalAnalysisTests(TestCase):
 
         self.assertEqual(delete_response.status_code, 200)
         self.assertFalse(TreatmentEntry.objects.filter(id=treatment_entry.id).exists())
+        self.assertFalse(TreatmentTrainingRecord.objects.filter(treatment_id=treatment_entry.id).exists())
+
+
+class TrainingPipelineTests(TestCase):
+    def setUp(self):
+        self.user = user_model.objects.create_user(
+            username="ml_user",
+            email="ml@example.com",
+            password="SecurePass123!",
+        )
+
+    def _create_reviewed_case(self, title, condition, symptoms_text, report_text, specialization, notes):
+        analysis = MedicalAnalysis.objects.create(
+            user=self.user,
+            title=title,
+            symptoms_text=symptoms_text,
+            report_text=report_text,
+            ai_summary=f"AI review for {condition}",
+            predicted_condition=condition,
+            risk_level="Medium",
+            detected_conditions_count=1,
+            model_source="heuristic",
+        )
+        return TreatmentEntry.objects.create(
+            analysis=analysis,
+            doctor_name="Dr. Review",
+            doctor_id=f"DOC-{analysis.id}",
+            specialization=specialization,
+            treatment_notes=notes,
+            added_by=self.user,
+        )
+
+    def test_export_training_dataset_command_writes_jsonl(self):
+        self._create_reviewed_case(
+            "Respiratory case",
+            "Respiratory",
+            "Persistent cough and wheeze",
+            "Bronchial inflammation noted in report",
+            "Pulmonology",
+            "Start bronchodilator and follow-up review.",
+        )
+
+        output_path = Path("medical_app") / "ml_models" / f"test-training-{uuid.uuid4().hex}.jsonl"
+        try:
+            call_command("export_training_dataset", output=str(output_path))
+
+            self.assertTrue(output_path.exists())
+            self.assertIn("Respiratory", output_path.read_text(encoding="utf-8"))
+        finally:
+            if output_path.exists():
+                output_path.unlink()
+
+    def test_generic_ai_condition_falls_back_to_doctor_specialization(self):
+        treatment = self._create_reviewed_case(
+            "Eye case",
+            "Visual review suggested",
+            "",
+            "Eye irritation with redness",
+            "Eye Specialist",
+            "Clean the eye and monitor irritation.",
+        )
+
+        training_record = TreatmentTrainingRecord.objects.get(treatment=treatment)
+
+        self.assertEqual(training_record.target_condition, "Eye Specialist")
+        self.assertIn("fell back to doctor specialization", training_record.review_notes)
+
+    def test_train_condition_model_creates_model_used_by_analysis_engine(self):
+        self._create_reviewed_case(
+            "Respiratory case",
+            "Respiratory",
+            "Persistent cough and wheeze",
+            "Bronchial inflammation and asthma concern",
+            "Pulmonology",
+            "Start bronchodilator and inhaler support.",
+        )
+        self._create_reviewed_case(
+            "Infection case",
+            "Infection",
+            "Fever with throat pain",
+            "Bacterial infection markers elevated",
+            "Internal Medicine",
+            "Start antibiotic review and hydration plan.",
+        )
+
+        model_path = Path("medical_app") / "ml_models" / f"test-report-classifier-{uuid.uuid4().hex}.pkl"
+        metrics_path = Path("medical_app") / "ml_models" / f"test-report-metrics-{uuid.uuid4().hex}.json"
+        try:
+            call_command(
+                "train_condition_model",
+                output=str(model_path),
+                metrics_output=str(metrics_path),
+                minimum_records=2,
+            )
+
+            self.assertTrue(model_path.exists())
+            self.assertTrue(metrics_path.exists())
+
+            metrics = load_evaluation_report(metrics_path)
+            self.assertEqual(metrics["total_records"], 2)
+            self.assertEqual(metrics["train_count"], 1)
+            self.assertEqual(metrics["test_count"], 1)
+
+            with patch("medical_app.analysis_engine.REPORT_MODEL_PATH", model_path):
+                result = analyze_report_text("Patient has persistent cough and wheeze with bronchial irritation.")
+
+            self.assertEqual(result["model_source"], "trained-model")
+            self.assertEqual(result["predicted_condition"], "Respiratory")
+        finally:
+            if model_path.exists():
+                model_path.unlink()
+            if metrics_path.exists():
+                metrics_path.unlink()
 
 
 class AccountSettingsTests(TestCase):

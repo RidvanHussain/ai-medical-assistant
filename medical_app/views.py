@@ -8,7 +8,7 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
-from django.db.models import Q
+from django.db.models import Avg, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -20,7 +20,12 @@ from medical_app.ai.brain_of_the_doctor import analyze_image_with_query, encode_
 from medical_app.ai.voice_of_the_doctor import text_to_speech_with_edge
 from medical_app.ai.voice_of_the_patient import transcribe_with_groq
 
-from .analysis_engine import analyze_image_record, analyze_report_text, compare_analyses
+from .analysis_engine import (
+    analyze_image_record,
+    analyze_report_text,
+    compare_analyses,
+    compare_disease_levels,
+)
 from .bootstrap import ensure_demo_setup
 from .forms import (
     _build_unique_username,
@@ -40,8 +45,10 @@ from .models import (
     MedicalAnalysis,
     PendingRegistration,
     TreatmentEntry,
+    TreatmentTrainingRecord,
     UserProfile,
 )
+from .model_evaluation import load_evaluation_report
 from .verification import issue_registration_otp_challenge
 
 load_dotenv()
@@ -284,6 +291,52 @@ def _build_risk_distribution(analyses_queryset):
     ]
 
 
+def _build_treatment_summary_text(text, limit=180):
+    cleaned_text = " ".join((text or "").split())
+    if len(cleaned_text) <= limit:
+        return cleaned_text
+
+    truncated_text = cleaned_text[:limit].rsplit(" ", 1)[0].strip()
+    return f"{truncated_text}..."
+
+
+def _build_public_treatment_summaries(limit=5):
+    summaries = []
+    queryset = (
+        TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
+        .filter(is_approved=True)
+        .order_by("-updated_at")[:limit]
+    )
+
+    for record in queryset:
+        summaries.append(
+            {
+                "condition": record.target_condition or "General review required",
+                "specialization": record.target_specialization or "General medicine",
+                "summary": _build_treatment_summary_text(record.target_treatment),
+                "quality_score": record.quality_score,
+                "updated_at": record.updated_at,
+            }
+        )
+
+    return summaries
+
+
+def _build_otp_delivery_note():
+    notes = []
+
+    if settings.EMAIL_BACKEND == "django.core.mail.backends.console.EmailBackend":
+        notes.append("Email OTPs are currently printed in the server terminal.")
+
+    if settings.SMS_BACKEND == "console":
+        notes.append("Mobile OTPs are currently printed in the server terminal.")
+
+    if not notes:
+        return "Email and mobile OTP delivery are configured for external providers."
+
+    return " ".join(notes)
+
+
 def healthcheck_view(request):
     return JsonResponse(
         {
@@ -303,7 +356,9 @@ def index(request):
     error_message = ""
     submitted_symptoms = ""
     submitted_report_notes = ""
+    submitted_previous_report_notes = ""
     report_summary = ""
+    report_comparison = None
     latest_analysis = None
     featured_images = FeaturedImage.objects.filter(is_active=True)
 
@@ -311,8 +366,10 @@ def index(request):
         image = request.FILES.get("image")
         audio = request.FILES.get("audio")
         report_file = request.FILES.get("report_file")
+        previous_report_file = request.FILES.get("previous_report_file")
         submitted_symptoms = (request.POST.get("symptoms") or "").strip()
         submitted_report_notes = (request.POST.get("report_notes") or "").strip()
+        submitted_previous_report_notes = (request.POST.get("previous_report_notes") or "").strip()
         language = (request.POST.get("language") or "english").strip().lower()
 
         if submitted_symptoms:
@@ -321,7 +378,9 @@ def index(request):
         encoded_image = None
         mime_type = "image/jpeg"
         report_text = submitted_report_notes
+        previous_report_text = submitted_previous_report_notes
         report_relative_path = ""
+        previous_report_relative_path = ""
         image_relative_path = ""
         previous_analysis = (
             MedicalAnalysis.objects.filter(user=request.user).first()
@@ -356,6 +415,23 @@ def index(request):
                 if extracted_report_text:
                     report_text = "\n\n".join(part for part in [submitted_report_notes, extracted_report_text] if part)
 
+            if previous_report_file:
+                previous_report_suffix = Path(previous_report_file.name).suffix.lower() or ".txt"
+                previous_report_filename = f"{uuid.uuid4()}{previous_report_suffix}"
+                saved_previous_report_path = _save_uploaded_file(
+                    previous_report_file,
+                    "medical_reports",
+                    previous_report_filename,
+                )
+                previous_report_relative_path = _build_media_relative_path(saved_previous_report_path)
+                extracted_previous_report_text = _extract_report_text(saved_previous_report_path)
+                if extracted_previous_report_text:
+                    previous_report_text = "\n\n".join(
+                        part
+                        for part in [submitted_previous_report_notes, extracted_previous_report_text]
+                        if part
+                    )
+
             if speech_text or encoded_image or report_text:
                 doctor_response = analyze_image_with_query(
                     query=_build_summary_prompt(
@@ -371,6 +447,18 @@ def index(request):
                 analysis_source_text = "\n\n".join(part for part in [speech_text, report_text] if part)
                 report_insights = analyze_report_text(analysis_source_text)
                 image_insights = analyze_image_record(image_relative_path)
+                current_report_insights = analyze_report_text(report_text or analysis_source_text)
+                previous_report_insights = (
+                    analyze_report_text(previous_report_text)
+                    if previous_report_text
+                    else {"disease_percentage": None}
+                )
+                report_comparison = compare_disease_levels(
+                    current_report_insights.get("disease_percentage"),
+                    previous_report_insights.get("disease_percentage")
+                    if previous_report_text
+                    else (previous_analysis.disease_percentage if previous_analysis else None),
+                )
 
                 try:
                     audio_filename = f"{uuid.uuid4()}_response.mp3"
@@ -395,6 +483,8 @@ def index(request):
                     transcription_text=speech_text if audio else "",
                     report_text=report_text,
                     report_file=report_relative_path,
+                    previous_report_text=previous_report_text,
+                    previous_report_file=previous_report_relative_path,
                     medical_image=image_relative_path,
                     ai_summary=doctor_response,
                     predicted_condition=(
@@ -410,6 +500,18 @@ def index(request):
                         report_insights["confidence_score"],
                         image_insights["confidence_score"],
                     ),
+                    disease_percentage=current_report_insights.get("disease_percentage"),
+                    previous_disease_percentage=(
+                        report_comparison["previous_percentage"] if report_comparison else None
+                    ),
+                    percentage_reduced=(
+                        report_comparison["decrease_percentage"] if report_comparison else None
+                    ),
+                    percentage_remaining=(
+                        report_comparison["remaining_percentage"]
+                        if report_comparison
+                        else current_report_insights.get("disease_percentage")
+                    ),
                     progression_status="Baseline",
                     model_source=(
                         report_insights["model_source"]
@@ -422,6 +524,8 @@ def index(request):
                 comparison = compare_analyses(latest_analysis, previous_analysis)
                 latest_analysis.progression_status = comparison["status"]
                 latest_analysis.save(update_fields=["progression_status"])
+                if comparison.get("has_percentage_data"):
+                    report_comparison = comparison
             else:
                 error_message = "Provide symptoms, a voice recording, or an image before running analysis."
         except Exception:
@@ -442,7 +546,9 @@ def index(request):
             "error_message": error_message,
             "submitted_symptoms": submitted_symptoms,
             "submitted_report_notes": submitted_report_notes,
+            "submitted_previous_report_notes": submitted_previous_report_notes,
             "report_summary": report_summary,
+            "report_comparison": report_comparison,
             "latest_analysis": latest_analysis,
             "featured_images": featured_images,
         },
@@ -455,17 +561,14 @@ def dashboard_view(request):
 
     current_user_logins = request.user.login_activities.filter(is_active=True)
     analysis_queryset = _get_analysis_queryset_for_user(request.user)
+    training_queryset = TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
+    approved_training_queryset = training_queryset.filter(is_approved=True)
+    model_evaluation_report = load_evaluation_report()
     latest_analysis = analysis_queryset.first()
     previous_analysis = analysis_queryset[1] if analysis_queryset.count() > 1 else None
     analysis_comparison = compare_analyses(latest_analysis, previous_analysis)
     recent_analyses = analysis_queryset[:5]
-    recent_treatments = (
-        TreatmentEntry.objects.select_related("analysis", "added_by")[:5]
-        if request.user.is_staff
-        else TreatmentEntry.objects.select_related("analysis", "added_by").filter(
-            analysis__user=request.user
-        )[:5]
-    )
+    public_treatment_summaries = _build_public_treatment_summaries()
 
     dashboard_stats = [
         {
@@ -487,6 +590,11 @@ def dashboard_view(request):
             "label": "Treatments logged",
             "value": TreatmentEntry.objects.count(),
             "helper": "Doctor treatment actions captured in the audit log",
+        },
+        {
+            "label": "Training-ready records",
+            "value": approved_training_queryset.count(),
+            "helper": "Doctor-reviewed cases available for ML model updates",
         },
     ]
 
@@ -510,7 +618,14 @@ def dashboard_view(request):
         "analysis_comparison": analysis_comparison,
         "latest_analysis": latest_analysis,
         "recent_analyses": recent_analyses,
-        "recent_treatments": recent_treatments,
+        "public_treatment_summaries": public_treatment_summaries,
+        "training_dataset_summary": {
+            "record_count": training_queryset.count(),
+            "approved_count": approved_training_queryset.count(),
+            "average_quality": int(approved_training_queryset.aggregate(avg=Avg("quality_score"))["avg"] or 0),
+            "latest_synced_at": approved_training_queryset.first().updated_at if approved_training_queryset.exists() else None,
+        },
+        "model_evaluation_summary": model_evaluation_report,
         "user_rows": _build_user_rows() if request.user.is_staff else [],
     }
 
@@ -616,7 +731,10 @@ def analysis_detail_view(request, analysis_id):
         treatment_entry.analysis = analysis
         treatment_entry.added_by = request.user
         treatment_entry.save()
-        messages.success(request, "Treatment entry saved successfully.")
+        messages.success(
+            request,
+            "Treatment entry saved successfully and synced to the ML training dataset.",
+        )
         return redirect("analysis_detail", analysis_id=analysis.id)
 
     previous_analysis = (
@@ -632,8 +750,9 @@ def analysis_detail_view(request, analysis_id):
         {
             "analysis": analysis,
             "comparison": comparison,
+            "percentage_comparison": comparison if comparison.get("has_percentage_data") else None,
             "treatment_form": treatment_form,
-            "treatments": analysis.treatments.all(),
+            "treatments": analysis.treatments.select_related("added_by", "training_record").all(),
         },
     )
 
@@ -649,7 +768,10 @@ def treatment_entry_edit_view(request, analysis_id, treatment_id):
         if not updated_entry.added_by:
             updated_entry.added_by = request.user
         updated_entry.save()
-        messages.success(request, "Treatment entry updated successfully.")
+        messages.success(
+            request,
+            "Treatment entry updated successfully and the ML training dataset has been refreshed.",
+        )
         return redirect("analysis_detail", analysis_id=analysis.id)
 
     return render(
@@ -818,11 +940,7 @@ def register_verify_view(request, token):
             "form": form,
             "pending_registration": pending_registration,
             "otp_expiry_minutes": settings.REGISTRATION_OTP_EXPIRY_MINUTES,
-            "otp_demo_note": (
-                "In local development, email OTPs use the configured Django email backend and mobile OTPs are written to the server console."
-                if settings.DEBUG
-                else ""
-            ),
+            "otp_demo_note": _build_otp_delivery_note(),
         },
     )
 
