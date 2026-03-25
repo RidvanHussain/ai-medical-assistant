@@ -1,10 +1,10 @@
 import csv
 import json
+import shutil
 import uuid
 import zipfile
 from io import StringIO
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -59,6 +59,18 @@ def write_zipped_csv(zip_path, member_name, fieldnames, rows):
             archive_file.write(text_stream.getvalue().encode("utf-8"))
 
 
+def make_scratch_dir(prefix):
+    scratch_root = Path.cwd() / "_test_scratch"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch_dir = scratch_root / f"{prefix}-{uuid.uuid4().hex}"
+    scratch_dir.mkdir(parents=True, exist_ok=False)
+    return scratch_dir
+
+
+def cleanup_scratch_dir(path):
+    shutil.rmtree(path, ignore_errors=True)
+
+
 class PublicPageTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -100,13 +112,39 @@ class LoginPageTests(TestCase):
     def setUp(self):
         cache.clear()
 
-    def test_login_page_shows_disabled_gmail_button_when_oauth_not_configured(self):
+    def test_allauth_login_redirects_to_branded_login(self):
+        response = self.client.get("/accounts/login/?next=/dashboard/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/login/?next=%2Fdashboard%2F")
+
+    def test_allauth_signup_redirects_to_branded_registration(self):
+        response = self.client.get("/accounts/signup/?next=/dashboard/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/register/?next=%2Fdashboard%2F")
+
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID="",
+        GOOGLE_OAUTH_CLIENT_SECRET="",
+    )
+    def test_login_page_shows_clickable_gmail_button_when_oauth_not_configured(self):
         response = self.client.get(reverse("login"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Login with Gmail")
-        self.assertContains(response, "GOOGLE_OAUTH_CLIENT_ID")
-        self.assertContains(response, "disabled")
+        self.assertContains(response, reverse("google_login_start"))
+        self.assertNotContains(response, "disabled")
+
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID="",
+        GOOGLE_OAUTH_CLIENT_SECRET="",
+    )
+    def test_google_login_route_returns_to_login_when_oauth_not_configured(self):
+        response = self.client.get(f"{reverse('google_login_start')}?next=/dashboard/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], "/login/?next=%2Fdashboard%2F")
 
     @override_settings(
         GOOGLE_OAUTH_CLIENT_ID="google-client-id",
@@ -117,8 +155,21 @@ class LoginPageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Login with Gmail")
-        self.assertContains(response, "/accounts/google/login/")
-        self.assertNotContains(response, "Configure <code>GOOGLE_OAUTH_CLIENT_ID</code>")
+        self.assertContains(response, reverse("google_login_start"))
+        self.assertContains(response, "Google opens its account chooser directly")
+
+    @override_settings(
+        GOOGLE_OAUTH_CLIENT_ID="google-client-id",
+        GOOGLE_OAUTH_CLIENT_SECRET="google-client-secret",
+    )
+    def test_google_login_route_redirects_to_provider_when_oauth_configured(self):
+        response = self.client.get(f"{reverse('google_login_start')}?next=/dashboard/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            "/accounts/google/login/?next=%2Fdashboard%2F",
+        )
 
 
 class AnalysisEngineTests(TestCase):
@@ -150,8 +201,8 @@ class AnalysisEngineTests(TestCase):
 
 class DatasetImportTests(TestCase):
     def test_load_classifier_records_reads_zip_files_and_excludes_noisy_sources_by_default(self):
-        with TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir)
+        dataset_dir = make_scratch_dir("dataset-import-classifier")
+        try:
             write_csv_dataset(
                 dataset_dir / "medical_data.csv",
                 ["Patient_Problem", "Disease", "Prescription"],
@@ -224,10 +275,12 @@ class DatasetImportTests(TestCase):
             self.assertTrue(summary["datasets"]["medical_data.csv"]["found"])
             self.assertTrue(summary["datasets"]["Diseases_Symptoms.csv"]["found"])
             self.assertTrue(summary["datasets"]["medical_question_answer_dataset_50000.csv"]["found"])
+        finally:
+            cleanup_scratch_dir(dataset_dir)
 
     def test_load_qa_corpus_entries_deduplicates_exact_duplicate_pairs(self):
-        with TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir)
+        dataset_dir = make_scratch_dir("dataset-import-qa")
+        try:
             write_csv_dataset(
                 dataset_dir / "medical_data.csv",
                 ["Patient_Problem", "Disease", "Prescription"],
@@ -279,10 +332,12 @@ class DatasetImportTests(TestCase):
             self.assertEqual(len(entries), 3)
             self.assertEqual(summary["duplicates_removed"], 1)
             self.assertEqual(summary["source_distribution"]["medical_question_answer_dataset_50000.csv"], 1)
+        finally:
+            cleanup_scratch_dir(dataset_dir)
 
     def test_import_external_datasets_dry_run_reports_clean_records(self):
-        with TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir)
+        dataset_dir = make_scratch_dir("dataset-import-command")
+        try:
             write_csv_dataset(
                 dataset_dir / "medical_data.csv",
                 ["Patient_Problem", "Disease", "Prescription"],
@@ -340,6 +395,8 @@ class DatasetImportTests(TestCase):
             )
 
             self.assertIn("Would create 3 external training records", output.getvalue())
+        finally:
+            cleanup_scratch_dir(dataset_dir)
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -1021,8 +1078,8 @@ class TrainingPipelineTests(TestCase):
                 summary_path.unlink()
 
     def test_train_qa_ranker_command_writes_runtime_artifacts(self):
-        with TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir)
+        dataset_dir = make_scratch_dir("dataset-train-qa")
+        try:
             write_csv_dataset(
                 dataset_dir / "medical_data.csv",
                 ["Patient_Problem", "Disease", "Prescription"],
@@ -1099,6 +1156,8 @@ class TrainingPipelineTests(TestCase):
                 for artifact_path in (qa_model_path, qa_corpus_path, qa_metrics_path, qa_summary_path):
                     if artifact_path.exists():
                         artifact_path.unlink()
+        finally:
+            cleanup_scratch_dir(dataset_dir)
 
 
 class BootstrapDefaultsCommandTests(TestCase):

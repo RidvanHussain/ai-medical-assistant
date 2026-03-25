@@ -2,14 +2,13 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.db.models import Avg, Count, Prefetch, Q
+from django.db.models import Avg, Count, Max, Prefetch, Q
 from django.urls import reverse
 from django.utils import timezone
 
 from medical_app.analysis_engine import compare_analyses
 from medical_app.model_evaluation import load_evaluation_report
 from medical_app.models import (
-    ChatMessage,
     ChatSession,
     FeaturedImage,
     LoginActivity,
@@ -73,6 +72,10 @@ def get_mobile_number(user):
 
 def get_user_locations(user):
     active_logins = user.login_activities.filter(is_active=True).only("location_label")
+    return _extract_locations(active_logins)
+
+
+def _extract_locations(active_logins):
     locations = sorted({activity.location_label for activity in active_logins if activity.location_label})
     return locations or ["No active location recorded"]
 
@@ -130,8 +133,18 @@ def _build_risk_counts(analysis_queryset):
     return risk_counts
 
 
-def _build_risk_distribution(analysis_queryset):
-    risk_counts = _build_risk_counts(analysis_queryset)
+def _build_analysis_summary(analysis_queryset):
+    summary = analysis_queryset.aggregate(
+        total_count=Count("id"),
+        compared_report_count=Count("id", filter=Q(previous_disease_percentage__isnull=False)),
+        high_risk_count=Count("id", filter=Q(risk_level="High")),
+        low_confidence_count=Count("id", filter=Q(confidence_score__lt=0.55)),
+    )
+    summary["risk_counts"] = _build_risk_counts(analysis_queryset)
+    return summary
+
+
+def _build_risk_distribution(risk_counts):
     max_count = max(risk_counts.values(), default=1) or 1
     return [
         {
@@ -186,7 +199,6 @@ def _build_user_rows():
     rows = []
     for user in users:
         active_logins = list(getattr(user, "active_login_activities", []))
-        locations = sorted({activity.location_label for activity in active_logins if activity.location_label})
         rows.append(
             {
                 "id": user.id,
@@ -195,7 +207,7 @@ def _build_user_rows():
                 "role": "Admin" if user.is_staff else "Member",
                 "status": "Online" if active_logins else "Offline",
                 "device_count": len(active_logins),
-                "locations": locations or ["No active location recorded"],
+                "locations": _extract_locations(active_logins),
                 "view_url": reverse("dashboard_user_view", args=[user.id]),
                 "edit_url": reverse("dashboard_user_edit", args=[user.id]),
                 "delete_url": reverse("dashboard_user_delete", args=[user.id]),
@@ -292,8 +304,7 @@ def _build_model_mix(analysis_queryset):
     )
 
 
-def _build_risk_donut(analysis_queryset):
-    risk_counts = _build_risk_counts(analysis_queryset)
+def _build_risk_donut(risk_counts):
     total = sum(risk_counts.values())
     return _build_donut_chart(
         "Risk Distribution",
@@ -304,9 +315,26 @@ def _build_risk_donut(analysis_queryset):
     )
 
 
-def _build_alerts(analysis_queryset, current_user_logins, model_evaluation_summary, approved_training_count):
+def _build_training_summary(training_queryset):
+    summary = training_queryset.aggregate(
+        record_count=Count("id"),
+        approved_count=Count("id", filter=Q(is_approved=True)),
+        average_quality=Avg("quality_score", filter=Q(is_approved=True)),
+        latest_synced_at=Max("updated_at", filter=Q(is_approved=True)),
+    )
+    summary["average_quality"] = int(summary["average_quality"] or 0)
+    return summary
+
+
+def _build_alerts(
+    *,
+    high_risk_count,
+    low_confidence_count,
+    active_device_count,
+    model_evaluation_summary,
+    approved_training_count,
+):
     alerts = []
-    high_risk_count = analysis_queryset.filter(risk_level="High").count()
     if high_risk_count:
         alerts.append(
             {
@@ -316,7 +344,6 @@ def _build_alerts(analysis_queryset, current_user_logins, model_evaluation_summa
             }
         )
 
-    low_confidence_count = analysis_queryset.filter(confidence_score__lt=0.55).count()
     if low_confidence_count:
         alerts.append(
             {
@@ -326,12 +353,12 @@ def _build_alerts(analysis_queryset, current_user_logins, model_evaluation_summa
             }
         )
 
-    if len(current_user_logins) > 2:
+    if active_device_count > 2:
         alerts.append(
             {
                 "severity": "info",
                 "title": "Multiple active devices",
-                "message": f"{len(current_user_logins)} devices are currently signed in under this account.",
+                "message": f"{active_device_count} devices are currently signed in under this account.",
             }
         )
 
@@ -396,13 +423,8 @@ def build_dashboard_context(user):
     if context is not None:
         return context
 
-    analysis_queryset = (
-        MedicalAnalysis.objects.select_related("user")
-        if user.is_staff
-        else MedicalAnalysis.objects.select_related("user").filter(user=user)
-    )
+    analysis_queryset = get_visible_analysis_queryset(user)
     training_queryset = TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
-    approved_training_queryset = training_queryset.filter(is_approved=True)
     current_user_logins = list(
         user.login_activities.filter(is_active=True).only(
             "location_label",
@@ -414,14 +436,17 @@ def build_dashboard_context(user):
     latest_analyses = list(analysis_queryset.order_by("-created_at")[:5])
     latest_analysis = latest_analyses[0] if latest_analyses else None
     previous_analysis = latest_analyses[1] if len(latest_analyses) > 1 else None
-    approved_training_latest = approved_training_queryset.first()
     model_evaluation_summary = load_evaluation_report()
     analysis_comparison = compare_analyses(latest_analysis, previous_analysis)
     profile = getattr(user, "profile", None)
-    risk_donut = _build_risk_donut(analysis_queryset)
+    mobile_number = profile.mobile_number if profile and profile.mobile_number else get_mobile_number(user)
+    analysis_summary = _build_analysis_summary(analysis_queryset)
+    training_summary = _build_training_summary(training_queryset)
+    risk_counts = analysis_summary["risk_counts"]
+    risk_donut = _build_risk_donut(risk_counts)
     condition_mix_donut = _build_condition_mix(analysis_queryset)
     model_mix_donut = _build_model_mix(analysis_queryset)
-    approved_training_count = approved_training_queryset.count()
+    approved_training_count = training_summary["approved_count"]
 
     if user.is_staff:
         dashboard_stats = [
@@ -450,17 +475,17 @@ def build_dashboard_context(user):
         dashboard_stats = [
             {
                 "label": "Tracked cases",
-                "value": analysis_queryset.count(),
+                "value": analysis_summary["total_count"],
                 "helper": "Your saved clinical records and report reviews.",
             },
             {
                 "label": "Compared reports",
-                "value": analysis_queryset.filter(previous_disease_percentage__isnull=False).count(),
+                "value": analysis_summary["compared_report_count"],
                 "helper": "Cases with old-vs-new report comparison already calculated.",
             },
             {
                 "label": "High-risk alerts",
-                "value": analysis_queryset.filter(risk_level="High").count(),
+                "value": analysis_summary["high_risk_count"],
                 "helper": "Records that may need faster clinical attention.",
             },
             {
@@ -495,17 +520,17 @@ def build_dashboard_context(user):
         "current_user_summary": {
             "display_name": user.get_full_name().strip() or user.username,
             "user_id": user.email or user.username,
-            "mobile_number": get_mobile_number(user),
+            "mobile_number": mobile_number,
             "role": "Admin" if user.is_staff else "Member",
             "device_count": len(current_user_logins),
-            "locations": get_user_locations(user),
+            "locations": _extract_locations(current_user_logins),
             "response_style": profile.response_style if profile else "balanced",
             "language_preference": profile.language_preference if profile else "english",
         },
         "current_user_logins": current_user_logins,
         "login_chart_data": _build_login_chart_data(),
         "analysis_chart_data": _build_analysis_trend(analysis_queryset),
-        "risk_distribution": _build_risk_distribution(analysis_queryset),
+        "risk_distribution": _build_risk_distribution(risk_counts),
         "risk_donut": risk_donut,
         "condition_mix_donut": condition_mix_donut,
         "model_mix_donut": model_mix_donut,
@@ -519,18 +544,14 @@ def build_dashboard_context(user):
         "recent_analyses": latest_analyses,
         "history_highlights": _build_history_highlights(analysis_queryset),
         "public_treatment_summaries": _build_public_treatment_summaries(),
-        "training_dataset_summary": {
-            "record_count": training_queryset.count(),
-            "approved_count": approved_training_count,
-            "average_quality": int(approved_training_queryset.aggregate(avg=Avg("quality_score"))["avg"] or 0),
-            "latest_synced_at": approved_training_latest.updated_at if approved_training_latest else None,
-        },
+        "training_dataset_summary": training_summary,
         "model_evaluation_summary": model_evaluation_summary,
         "alerts": _build_alerts(
-            analysis_queryset,
-            current_user_logins,
-            model_evaluation_summary,
-            approved_training_count,
+            high_risk_count=analysis_summary["high_risk_count"],
+            low_confidence_count=analysis_summary["low_confidence_count"],
+            active_device_count=len(current_user_logins),
+            model_evaluation_summary=model_evaluation_summary,
+            approved_training_count=approved_training_count,
         ),
         "user_rows": _build_user_rows() if user.is_staff else [],
     }
@@ -541,6 +562,12 @@ def build_dashboard_context(user):
 def build_history_context(user, session_id=None, search="", risk=""):
     search = (search or "").strip()
     risk = (risk or "").strip()
+    base_history_queryset = MedicalAnalysis.objects.filter(user=user)
+    history_summary = base_history_queryset.aggregate(
+        total_count=Count("id"),
+        compared_report_count=Count("id", filter=Q(previous_disease_percentage__isnull=False)),
+        high_risk_count=Count("id", filter=Q(risk_level="High")),
+    )
 
     session_queryset = (
         ChatSession.objects.filter(user=user)
@@ -548,6 +575,7 @@ def build_history_context(user, session_id=None, search="", risk=""):
         .order_by("-created_at")
     )
     sessions = list(session_queryset[:10])
+    session_count = session_queryset.count()
     selected_session = None
     if session_id:
         selected_session = next((session for session in sessions if str(session.id) == str(session_id)), None)
@@ -559,7 +587,7 @@ def build_history_context(user, session_id=None, search="", risk=""):
         messages = list(selected_session.messages.order_by("created_at"))
 
     analysis_queryset = (
-        MedicalAnalysis.objects.filter(user=user)
+        base_history_queryset
         .prefetch_related(
             Prefetch(
                 "treatments",
@@ -596,7 +624,7 @@ def build_history_context(user, session_id=None, search="", risk=""):
                     else "No doctor note has been attached to this case yet."
                 ),
                 "doctor_label": (
-                    f"{latest_treatment.doctor_name} • {latest_treatment.specialization}"
+                    f"{latest_treatment.doctor_name} - {latest_treatment.specialization}"
                     if latest_treatment
                     else "AI-generated clinical record"
                 ),
@@ -605,7 +633,6 @@ def build_history_context(user, session_id=None, search="", risk=""):
             }
         )
 
-    base_history_queryset = MedicalAnalysis.objects.filter(user=user)
     return {
         "sessions": sessions,
         "selected_session": selected_session,
@@ -615,22 +642,22 @@ def build_history_context(user, session_id=None, search="", risk=""):
         "history_stats": [
             {
                 "label": "Timeline cases",
-                "value": base_history_queryset.count(),
+                "value": history_summary["total_count"],
                 "helper": "Saved clinical records across your health journey.",
             },
             {
                 "label": "Compared reports",
-                "value": base_history_queryset.filter(previous_disease_percentage__isnull=False).count(),
+                "value": history_summary["compared_report_count"],
                 "helper": "Records that already include old-vs-new comparison data.",
             },
             {
                 "label": "High-risk cases",
-                "value": base_history_queryset.filter(risk_level="High").count(),
+                "value": history_summary["high_risk_count"],
                 "helper": "Cases currently tagged for closer follow-up.",
             },
             {
                 "label": "Chat sessions",
-                "value": session_queryset.count(),
+                "value": session_count,
                 "helper": "Saved assistant conversations available for review.",
             },
         ],

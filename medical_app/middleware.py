@@ -8,6 +8,7 @@ from .models import LoginActivity, UserProfile
 LOGIN_ACTIVITY_SYNC_INTERVAL = timedelta(minutes=5)
 LAST_SYNC_SESSION_KEY = "medical_app_login_sync_ts"
 LAST_FINGERPRINT_SESSION_KEY = "medical_app_login_sync_fingerprint"
+PROFILE_READY_SESSION_KEY = "medical_app_profile_ready"
 
 
 def _get_client_ip(request):
@@ -114,11 +115,15 @@ class CurrentLoginActivityMiddleware:
                 updated_fields.append("last_seen")
                 activity.save(update_fields=updated_fields)
 
-            profile, _ = UserProfile.objects.get_or_create(
-                user=request.user,
-                defaults={"mobile_number": "", "last_known_location": location_label},
-            )
-            if should_refresh and profile.last_known_location != location_label:
+            profile = None
+            if should_refresh or not request.session.get(PROFILE_READY_SESSION_KEY):
+                profile, _ = UserProfile.objects.get_or_create(
+                    user=request.user,
+                    defaults={"mobile_number": "", "last_known_location": location_label},
+                )
+                request.session[PROFILE_READY_SESSION_KEY] = True
+
+            if profile and should_refresh and profile.last_known_location != location_label:
                 profile.last_known_location = location_label
                 profile.save(update_fields=["last_known_location", "updated_at"])
 

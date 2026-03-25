@@ -1,4 +1,5 @@
 from django.contrib.auth import get_user_model
+from django.contrib.sites.models import Site
 
 from medical_app.models import FeaturedImage, UserProfile
 
@@ -95,7 +96,7 @@ def ensure_default_admin():
 
 
 def ensure_default_featured_images():
-    if FeaturedImage.objects.exists():
+    if FeaturedImage.objects.only("id").exists():
         return {"created": 0}
 
     FeaturedImage.objects.bulk_create([FeaturedImage(**item) for item in DEFAULT_FEATURED_IMAGES])
@@ -103,8 +104,23 @@ def ensure_default_featured_images():
 
 
 def bootstrap_defaults():
+    site = Site.objects.get_current()
+    site_changed = False
+    if site.domain != "127.0.0.1:8000":
+        site.domain = "127.0.0.1:8000"
+        site_changed = True
+    if site.name != "AI Medical Assistant":
+        site.name = "AI Medical Assistant"
+        site_changed = True
+    if site_changed:
+        site.save(update_fields=["domain", "name"])
+
     return {
         "admin": ensure_default_admin(),
         "featured_images": ensure_default_featured_images(),
+        "site": {
+            "changed": site_changed,
+            "domain": site.domain,
+            "name": site.name,
+        },
     }
-

@@ -1055,12 +1055,15 @@ audio {
 }
 
 .google-signin-button {
+    display: inline-flex;
+    align-items: center;
     width: 100%;
     justify-content: center;
     background: #ffffff;
     color: #132238;
     border: 1px solid var(--border);
     box-shadow: var(--shadow-soft);
+    text-decoration: none;
 }
 
 .google-signin-button:hover {
@@ -1081,7 +1084,7 @@ audio {
 
 .button-muted {
     opacity: 0.7;
-    cursor: not-allowed;
+    cursor: pointer;
 }
 
 .button-muted:hover {

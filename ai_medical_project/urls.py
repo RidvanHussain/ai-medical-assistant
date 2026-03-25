@@ -19,8 +19,12 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
+from medical_app import views as medical_views
+
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("accounts/login/", medical_views.allauth_login_redirect),
+    path("accounts/signup/", medical_views.allauth_signup_redirect),
     path("accounts/", include("allauth.urls")),
     path("", include("medical_app.urls")),
 ]

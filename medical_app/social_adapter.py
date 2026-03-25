@@ -12,7 +12,11 @@ class GoogleSocialAccountAdapter(DefaultSocialAccountAdapter):
         if request.user.is_authenticated:
             return
 
-        email = (sociallogin.account.extra_data.get("email") or "").strip().lower()
+        email = (
+            sociallogin.user.email
+            or sociallogin.account.extra_data.get("email")
+            or next((address.email for address in sociallogin.email_addresses if address.email), "")
+        ).strip().lower()
         if not email:
             return
 
@@ -22,7 +26,12 @@ class GoogleSocialAccountAdapter(DefaultSocialAccountAdapter):
 
     def populate_user(self, request, sociallogin, data):
         user = super().populate_user(request, sociallogin, data)
-        email = (data.get("email") or sociallogin.account.extra_data.get("email") or "").strip().lower()
+        email = (
+            data.get("email")
+            or sociallogin.account.extra_data.get("email")
+            or user.email
+            or next((address.email for address in sociallogin.email_addresses if address.email), "")
+        ).strip().lower()
         first_name = (
             data.get("first_name")
             or sociallogin.account.extra_data.get("given_name")

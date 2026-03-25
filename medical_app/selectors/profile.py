@@ -1,3 +1,4 @@
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from medical_app.models import MedicalAnalysis, UserProfile
@@ -13,9 +14,11 @@ def _get_profile(user):
 def build_profile_workspace_context(user):
     profile = _get_profile(user)
     analysis_queryset = MedicalAnalysis.objects.filter(user=user)
-    total_analyses = analysis_queryset.count()
-    compared_report_count = analysis_queryset.filter(previous_disease_percentage__isnull=False).count()
-    high_risk_count = analysis_queryset.filter(risk_level="High").count()
+    analysis_summary = analysis_queryset.aggregate(
+        total_analyses=Count("id"),
+        compared_report_count=Count("id", filter=Q(previous_disease_percentage__isnull=False)),
+        high_risk_count=Count("id", filter=Q(risk_level="High")),
+    )
     recent_analyses = list(
         analysis_queryset
         .only(
@@ -40,17 +43,17 @@ def build_profile_workspace_context(user):
         "profile_workspace_stats": [
             {
                 "label": "Saved analyses",
-                "value": total_analyses,
+                "value": analysis_summary["total_analyses"],
                 "helper": "All patient records currently stored in your secure workspace.",
             },
             {
                 "label": "Compared reports",
-                "value": compared_report_count,
+                "value": analysis_summary["compared_report_count"],
                 "helper": "Cases that already contain old-vs-new report comparison data.",
             },
             {
                 "label": "High-risk cases",
-                "value": high_risk_count,
+                "value": analysis_summary["high_risk_count"],
                 "helper": "Records that may need faster clinician review.",
             },
             {

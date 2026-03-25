@@ -3,12 +3,13 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 from medical_app.ai.brain_of_the_doctor import analyze_image_with_query, encode_image
@@ -98,6 +99,16 @@ def _build_otp_delivery_note():
     return " ".join(notes)
 
 
+def _resolve_safe_next_url(request, requested_next):
+    if requested_next and url_has_allowed_host_and_scheme(
+        requested_next,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return requested_next
+    return reverse("dashboard")
+
+
 def healthcheck_view(request):
     return JsonResponse(
         {
@@ -167,7 +178,9 @@ def chat_view(request):
     else:
         form = ChatForm()
 
-    history = serialize_history(session.messages.all().order_by("created_at"))
+    history = serialize_history(
+        session.messages.only("role", "text", "attachment", "created_at").order_by("created_at")
+    )
     attachment_count = sum(1 for item in history if item["attachment_url"])
     return render(
         request,
@@ -196,7 +209,12 @@ def history_view(request):
 
 @login_required
 def analysis_detail_view(request, analysis_id):
-    queryset = get_visible_analysis_queryset(request.user)
+    queryset = get_visible_analysis_queryset(request.user).prefetch_related(
+        Prefetch(
+            "treatments",
+            queryset=TreatmentEntry.objects.select_related("added_by", "training_record").order_by("-created_at"),
+        )
+    )
     analysis = get_object_or_404(queryset, pk=analysis_id)
     treatment_form = TreatmentEntryForm(request.POST or None)
 
@@ -226,7 +244,7 @@ def analysis_detail_view(request, analysis_id):
             "comparison": comparison,
             "percentage_comparison": comparison if comparison.get("has_percentage_data") else None,
             "treatment_form": treatment_form,
-            "treatments": analysis.treatments.select_related("added_by", "training_record").all(),
+            "treatments": analysis.treatments.all(),
         },
     )
 
@@ -284,16 +302,7 @@ def login_view(request):
         return redirect("dashboard")
 
     requested_next = request.POST.get("next") or request.GET.get("next")
-    next_url = (
-        requested_next
-        if requested_next
-        and url_has_allowed_host_and_scheme(
-            requested_next,
-            allowed_hosts={request.get_host()},
-            require_https=request.is_secure(),
-        )
-        else reverse("dashboard")
-    )
+    next_url = _resolve_safe_next_url(request, requested_next)
     form = LoginForm(request, data=request.POST or None)
 
     if request.method == "POST" and form.is_valid():
@@ -312,6 +321,35 @@ def login_view(request):
             ),
         },
     )
+
+
+def google_login_start(request):
+    if request.user.is_authenticated:
+        return redirect("dashboard")
+
+    requested_next = request.GET.get("next") or request.POST.get("next")
+    next_url = _resolve_safe_next_url(request, requested_next)
+
+    if not (settings.GOOGLE_OAUTH_CLIENT_ID and settings.GOOGLE_OAUTH_CLIENT_SECRET):
+        messages.warning(
+            request,
+            "Google login is not configured yet. Add GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET to .env, then restart the server.",
+        )
+        return redirect(f"{reverse('login')}?{urlencode({'next': next_url})}")
+
+    return redirect(f"/accounts/google/login/?{urlencode({'next': next_url})}")
+
+
+def allauth_login_redirect(request):
+    requested_next = request.GET.get("next") or request.POST.get("next")
+    next_url = _resolve_safe_next_url(request, requested_next)
+    return redirect(f"{reverse('login')}?{urlencode({'next': next_url})}")
+
+
+def allauth_signup_redirect(request):
+    requested_next = request.GET.get("next") or request.POST.get("next")
+    next_url = _resolve_safe_next_url(request, requested_next)
+    return redirect(f"{reverse('register')}?{urlencode({'next': next_url})}")
 
 
 def register_view(request):
@@ -400,7 +438,7 @@ def register_verify_view(request, token):
                     return redirect("register")
 
                 pending_registration.delete()
-                login(request, user)
+                login(request, user, backend="django.contrib.auth.backends.ModelBackend")
                 messages.success(request, "Your account has been created successfully.")
                 return redirect("dashboard")
 

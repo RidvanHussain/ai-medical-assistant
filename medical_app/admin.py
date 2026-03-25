@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db.models import Count
 
 from .models import (
     ChatMessage,
@@ -57,9 +58,12 @@ class ChatSessionAdmin(admin.ModelAdmin):
     search_fields = ("user__username", "user__email")
     ordering = ("-created_at",)
 
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(message_total=Count("messages"))
+
     @staticmethod
     def message_count(obj):
-        return obj.messages.count()
+        return getattr(obj, "message_total", 0)
 
 
 @admin.register(ChatMessage)
