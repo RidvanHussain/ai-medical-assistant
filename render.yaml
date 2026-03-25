@@ -2,7 +2,7 @@ services:
   - type: web
     name: ai-medical-assistant
     env: python
-    plan: free
+    plan: starter
     buildCommand: ./build.sh
     startCommand: python manage.py migrate --noinput && python manage.py configure_site && python manage.py bootstrap_defaults && gunicorn ai_medical_project.wsgi:application --bind 0.0.0.0:$PORT --workers ${GUNICORN_WORKERS:-1} --timeout ${GUNICORN_TIMEOUT:-180}
     disk:
