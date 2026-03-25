@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.contrib.sites.models import Site
 from django.core.cache import cache
 from django.core import mail
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -112,6 +113,19 @@ class PublicPageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class DeploymentCommandTests(TestCase):
+    def test_configure_site_updates_current_site(self):
+        call_command(
+            "configure_site",
+            "--domain=demo.example.com",
+            "--name=AI Medical Assistant Demo",
+        )
+
+        site = Site.objects.get(pk=1)
+        self.assertEqual(site.domain, "demo.example.com")
+        self.assertEqual(site.name, "AI Medical Assistant Demo")
 
 
 class SiteLanguageTests(TestCase):

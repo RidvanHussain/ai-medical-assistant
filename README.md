@@ -70,6 +70,131 @@ cd ai_medical_project
 python manage.py run_training_worker --continuous
 ```
 
+For local single-process testing, you can also set `DJANGO_INLINE_TRAINING_WORKER=true` in `.env` to let the web process poll the training queue itself.
+
+## Deployment
+
+The project is now prepared for production-oriented deployment with:
+
+- `gunicorn` for the Django web server
+- `DATABASE_URL` support for PostgreSQL
+- `configure_site` command for `django.contrib.sites`
+- optional media serving through Django for simple deployments
+- a separate background worker for queued ML refresh jobs on Docker or VPS setups
+- a Render-friendly inline training worker mode for single-service deployments
+- Docker artifacts for web, worker, and database services
+- a Render blueprint file for repeatable deployment
+
+### Render Deployment
+
+The app folder includes a ready-to-use [`render.yaml`](./render.yaml) blueprint.
+
+Render is configured around a single web service because the live web app and retraining pipeline both need access to the same persisted model artifacts. To keep deployment practical, the Render service uses:
+
+- PostgreSQL from Render
+- a persistent disk mounted at `/var/data`
+- `DJANGO_MODEL_ARTIFACT_ROOT=/var/data/ml_models`
+- `DJANGO_MEDIA_ROOT=/var/data/media`
+- `DJANGO_INLINE_TRAINING_WORKER=true`
+- `GUNICORN_WORKERS=1`
+
+This keeps:
+
+- uploaded media persistent
+- trained classifier and QA artifacts persistent
+- queued retraining outside normal request/response code, while still running inside the deployed service
+
+Recommended Render flow:
+
+```bash
+cd ai_medical_project
+git push origin main
+```
+
+Then in Render:
+
+1. Create a new Blueprint and point it at the GitHub repository.
+2. Let Render read [`render.yaml`](./render.yaml).
+3. Add required secrets such as `GROQ_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, and `GOOGLE_OAUTH_CLIENT_SECRET`.
+4. Trigger the first deploy.
+
+During deploy, Render will run:
+
+- `./build.sh`
+- `python manage.py migrate --noinput`
+- `python manage.py configure_site`
+- `python manage.py bootstrap_defaults`
+- `gunicorn ai_medical_project.wsgi:application ...`
+
+### Docker Deployment
+
+The app folder also includes:
+
+- [`Dockerfile`](./Dockerfile)
+- [`docker-compose.prod.yml`](./docker-compose.prod.yml)
+- [`Procfile`](./Procfile)
+- [`build.sh`](./build.sh)
+
+Basic Docker flow:
+
+```bash
+cd ai_medical_project
+copy .env.example .env
+docker compose -f docker-compose.prod.yml up --build
+```
+
+This starts:
+
+- `web` service with Gunicorn
+- `worker` service for `run_training_worker --continuous`
+- `db` service with PostgreSQL
+
+In Docker mode, the web and worker containers share:
+
+- uploaded media
+- trained model artifacts
+
+So background retraining updates remain visible to the live web app.
+
+### Important Deployment Environment Variables
+
+For real deployment, configure at least:
+
+- `DJANGO_SECRET_KEY`
+- `DJANGO_DEBUG=false`
+- `DJANGO_ALLOWED_HOSTS`
+- `DJANGO_CSRF_TRUSTED_ORIGINS`
+- `DATABASE_URL`
+- `DJANGO_SITE_DOMAIN`
+- `DJANGO_SITE_NAME`
+- `DJANGO_MODEL_ARTIFACT_ROOT`
+- `GROQ_API_KEY`
+
+Optional but recommended:
+
+- `DJANGO_INLINE_TRAINING_WORKER=true` for Render-style single-service deploys
+- `DJANGO_MEDIA_ROOT`
+- `DJANGO_SERVE_MEDIA=true`
+- `DJANGO_SESSION_COOKIE_SECURE=true`
+- `DJANGO_CSRF_COOKIE_SECURE=true`
+- `DJANGO_SECURE_SSL_REDIRECT=true`
+- `DJANGO_SECURE_HSTS_SECONDS`
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
+
+### First Production Start
+
+On first deployment, ensure these commands run:
+
+```bash
+python manage.py collectstatic --noinput
+python manage.py migrate --noinput
+python manage.py configure_site
+python manage.py bootstrap_defaults
+```
+
+Those steps are already included in the Docker/Gunicorn deployment flow provided here.
+
 ## Demo Credentials
 
 - Username: `Admin`

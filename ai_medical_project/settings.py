@@ -8,6 +8,10 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+try:
+    import dj_database_url
+except ImportError:  # pragma: no cover - optional until deployment dependencies are installed
+    dj_database_url = None
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -19,6 +23,26 @@ ALLOWED_HOSTS = [
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
     if host.strip()
 ]
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+USE_X_FORWARDED_HOST = os.getenv("DJANGO_USE_X_FORWARDED_HOST", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+if os.getenv("DJANGO_SECURE_PROXY_SSL_HEADER", "true").lower() in {"1", "true", "yes", "on"}:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+if RENDER_EXTERNAL_HOSTNAME:
+    render_origin = f"https://{RENDER_EXTERNAL_HOSTNAME}"
+    if render_origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(render_origin)
 
 
 # Application definition
@@ -76,12 +100,22 @@ WSGI_APPLICATION = "ai_medical_project.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DJANGO_DATABASE_URL", "")
+if DATABASE_URL and dj_database_url:
+    DATABASES = {
+        "default": dj_database_url.parse(
+            DATABASE_URL,
+            conn_max_age=int(os.getenv("DJANGO_DB_CONN_MAX_AGE", "600")),
+            ssl_require=os.getenv("DJANGO_DB_SSL_REQUIRE", "false").lower() in {"1", "true", "yes", "on"},
+        )
     }
-}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": os.getenv("DJANGO_SQLITE_PATH", str(BASE_DIR / "db.sqlite3")),
+        }
+    }
 
 
 # Password validation
@@ -126,7 +160,7 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATICFILES_DIRS = [BASE_DIR / "static"]
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_ROOT = Path(os.getenv("DJANGO_STATIC_ROOT", str(BASE_DIR / "staticfiles")))
 STORAGES = {
     "default": {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
@@ -139,7 +173,18 @@ WHITENOISE_AUTOREFRESH = DEBUG
 WHITENOISE_MAX_AGE = 0 if DEBUG else 31536000
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT = Path(os.getenv("DJANGO_MEDIA_ROOT", str(BASE_DIR / "media")))
+SERVE_MEDIA_FILES = os.getenv("DJANGO_SERVE_MEDIA", "false").lower() in {"1", "true", "yes", "on"}
+MODEL_ARTIFACT_ROOT = Path(
+    os.getenv("DJANGO_MODEL_ARTIFACT_ROOT", str(BASE_DIR / "medical_app" / "ml_models"))
+)
+INLINE_TRAINING_WORKER_ENABLED = os.getenv("DJANGO_INLINE_TRAINING_WORKER", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+INLINE_TRAINING_WORKER_POLL_SECONDS = int(os.getenv("DJANGO_INLINE_TRAINING_WORKER_POLL_SECONDS", "15"))
 
 CACHES = {
     "default": {
@@ -153,6 +198,10 @@ LOGIN_URL = "login"
 LOGIN_REDIRECT_URL = "dashboard"
 LOGOUT_REDIRECT_URL = "login"
 SITE_ID = int(os.getenv("DJANGO_SITE_ID", "1"))
+DJANGO_SITE_DOMAIN = os.getenv("DJANGO_SITE_DOMAIN", "127.0.0.1:8000").strip()
+DJANGO_SITE_NAME = os.getenv("DJANGO_SITE_NAME", "AI Medical Assistant").strip()
+if not os.getenv("DJANGO_SITE_DOMAIN") and RENDER_EXTERNAL_HOSTNAME:
+    DJANGO_SITE_DOMAIN = RENDER_EXTERNAL_HOSTNAME
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",

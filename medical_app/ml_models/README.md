@@ -1,5 +1,7 @@
 Place optional trained model files in this directory to augment the heuristic classifier used by the application.
 
+In production, the app can override this location with `DJANGO_MODEL_ARTIFACT_ROOT`, which is useful for persistent-disk deployments such as Render.
+
 If a trained model returns a label that conflicts with clear keyword-based report evidence, the app keeps the heuristic result so stale or out-of-scope models do not destabilize the UI.
 
 Supported file names:

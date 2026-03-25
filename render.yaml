@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: ai-medical-assistant
+    env: python
+    plan: free
+    buildCommand: ./build.sh
+    startCommand: python manage.py migrate --noinput && python manage.py configure_site && python manage.py bootstrap_defaults && gunicorn ai_medical_project.wsgi:application --bind 0.0.0.0:$PORT --workers ${GUNICORN_WORKERS:-1} --timeout ${GUNICORN_TIMEOUT:-180}
+    disk:
+      name: ai-medical-data
+      mountPath: /var/data
+      sizeGB: 5
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-medical-assistant-db
+          property: connectionString
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: "127.0.0.1,localhost,.onrender.com"
+      - key: DJANGO_CSRF_TRUSTED_ORIGINS
+        value: "https://*.onrender.com"
+      - key: DJANGO_SERVE_MEDIA
+        value: "true"
+      - key: DJANGO_MEDIA_ROOT
+        value: /var/data/media
+      - key: DJANGO_MODEL_ARTIFACT_ROOT
+        value: /var/data/ml_models
+      - key: DJANGO_INLINE_TRAINING_WORKER
+        value: "true"
+      - key: DJANGO_INLINE_TRAINING_WORKER_POLL_SECONDS
+        value: "15"
+      - key: DJANGO_USE_X_FORWARDED_HOST
+        value: "true"
+      - key: DJANGO_SECURE_PROXY_SSL_HEADER
+        value: "true"
+      - key: DJANGO_SESSION_COOKIE_SECURE
+        value: "true"
+      - key: DJANGO_CSRF_COOKIE_SECURE
+        value: "true"
+      - key: DJANGO_SECURE_SSL_REDIRECT
+        value: "true"
+      - key: GUNICORN_WORKERS
+        value: "1"
+      - key: GUNICORN_TIMEOUT
+        value: "180"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+
+databases:
+  - name: ai-medical-assistant-db
+    plan: free
+    postgresMajorVersion: "16"

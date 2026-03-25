@@ -4,6 +4,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
+from medical_app.analysis_engine import MODEL_DIR
 from medical_app.models import TreatmentTrainingRecord
 
 
@@ -19,7 +20,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--output",
-            help="Custom output path. Defaults to medical_app/ml_models/training_dataset.<format>.",
+            help="Custom output path. Defaults to the configured model-artifact directory.",
         )
         parser.add_argument(
             "--include-unapproved",
@@ -36,7 +37,7 @@ class Command(BaseCommand):
         records = [self._serialize_record(record) for record in queryset]
         output_path = Path(
             options["output"]
-            or Path("medical_app") / "ml_models" / f"training_dataset.{output_format}"
+            or MODEL_DIR / f"training_dataset.{output_format}"
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -89,4 +90,3 @@ class Command(BaseCommand):
             "review_notes": record.review_notes,
             "feature_snapshot": json.dumps(record.feature_snapshot, ensure_ascii=True),
         }
-

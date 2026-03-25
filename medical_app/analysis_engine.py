@@ -3,10 +3,12 @@ from pathlib import Path
 import pickle
 import re
 
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = Path(__file__).resolve().parent / "ml_models"
+MODEL_DIR = Path(getattr(settings, "MODEL_ARTIFACT_ROOT", Path(__file__).resolve().parent / "ml_models"))
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_MODEL_PATH = MODEL_DIR / "report_classifier.pkl"
 IMAGE_MODEL_PATH = MODEL_DIR / "image_classifier.pkl"
 GENERAL_REVIEW_REQUIRED = "General review required"
