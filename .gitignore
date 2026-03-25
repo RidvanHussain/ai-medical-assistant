@@ -25,9 +25,8 @@ media/
 staticfiles/
 
 # Generated local assets
-static/patient_audio.mp3
-static/uploaded_image.jpg
-static/final.mp3
+static/*_image.jpg
+static/*_response.mp3
 
 # Generated ML artifacts and exported datasets
 medical_app/ml_models/*.pkl

@@ -1,14 +1,9 @@
-import os
-import uuid
-from datetime import timedelta
-from pathlib import Path
-
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
-from django.db.models import Avg, Q
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -20,13 +15,7 @@ from medical_app.ai.brain_of_the_doctor import analyze_image_with_query, encode_
 from medical_app.ai.voice_of_the_doctor import text_to_speech_with_edge
 from medical_app.ai.voice_of_the_patient import transcribe_with_groq
 
-from .analysis_engine import (
-    analyze_image_record,
-    analyze_report_text,
-    compare_analyses,
-    compare_disease_levels,
-)
-from .bootstrap import ensure_demo_setup
+from .analysis_engine import compare_analyses
 from .forms import (
     _build_unique_username,
     AdminUserManagementForm,
@@ -38,105 +27,31 @@ from .forms import (
     TreatmentEntryForm,
 )
 from .models import (
-    ChatMessage,
-    ChatSession,
-    FeaturedImage,
     LoginActivity,
     MedicalAnalysis,
     PendingRegistration,
     TreatmentEntry,
-    TreatmentTrainingRecord,
     UserProfile,
 )
-from .model_evaluation import load_evaluation_report
+from .qa_engine import answer_question
+from .selectors.dashboard import (
+    build_dashboard_context,
+    build_history_context,
+    get_featured_images,
+    get_mobile_number,
+    get_user_locations,
+    get_visible_analysis_queryset,
+)
+from .selectors.profile import build_profile_workspace_context
+from .services.preferences import get_user_profile
+from .services.analysis import process_clinical_intake
+from .services.chat import get_or_create_session_for_user, process_chat_message, serialize_history
 from .verification import issue_registration_otp_challenge
 
 load_dotenv()
 
-MEDICAL_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 user_model = get_user_model()
 staff_required = user_passes_test(lambda user: user.is_staff, login_url="login")
-
-
-def _save_uploaded_file(uploaded_file, subdirectory, filename):
-    target_dir = Path(settings.MEDIA_ROOT) / subdirectory
-    target_dir.mkdir(parents=True, exist_ok=True)
-    file_path = target_dir / filename
-
-    with file_path.open("wb+") as destination:
-        for chunk in uploaded_file.chunks():
-            destination.write(chunk)
-
-    return file_path
-
-
-def _build_media_url(file_path):
-    relative_path = Path(file_path).relative_to(settings.MEDIA_ROOT).as_posix()
-    return f"{settings.MEDIA_URL}{relative_path}"
-
-
-def _build_media_relative_path(file_path):
-    return Path(file_path).relative_to(settings.MEDIA_ROOT).as_posix()
-
-
-def _build_summary_prompt(patient_text, language):
-    return "\n".join(
-        [
-            "You are a professional medical assistant.",
-            "Give general educational guidance only and encourage urgent care for emergency symptoms.",
-            f"Respond in {language}.",
-            "Use this response format:",
-            "1) Short introduction paragraph.",
-            "2) 3-5 bullet points.",
-            "3) Short conclusion with practical next steps.",
-            "Keep the answer concise, calm, and easy to understand.",
-            f"Patient details: {patient_text or 'No text symptoms provided.'}",
-        ]
-    )
-
-
-def _build_chat_prompt(patient_text):
-    return "\n".join(
-        [
-            "You are a professional medical assistant.",
-            "Give general educational guidance only and encourage urgent care for emergency symptoms.",
-            "Use this response format:",
-            "1) Short introduction paragraph.",
-            "2) 3-5 bullet points.",
-            "3) Short conclusion with practical next steps.",
-            "Keep the answer concise and clinically calm.",
-            f"Patient question: {patient_text}",
-        ]
-    )
-
-
-def _serialize_history(messages_queryset):
-    history = []
-
-    for message in messages_queryset:
-        history.append(
-            {
-                "role": message.role,
-                "text": message.text,
-                "attachment_url": message.attachment.url if message.attachment else "",
-                "timestamp": timezone.localtime(message.created_at).strftime("%b %d, %H:%M"),
-            }
-        )
-
-    return history
-
-
-def _get_session_for_request(request):
-    session = ChatSession.objects.filter(user=request.user).order_by("-created_at").first()
-    if not session:
-        session = ChatSession.objects.create(user=request.user)
-    return session
-
-
-def _get_analysis_queryset_for_user(user):
-    if user.is_staff:
-        return MedicalAnalysis.objects.all()
-    return MedicalAnalysis.objects.filter(user=user)
 
 
 def _create_user_from_pending_registration(pending_registration):
@@ -168,160 +83,6 @@ def _mark_current_login_inactive(request):
     LoginActivity.objects.filter(user=request.user, session_key=session_key).update(is_active=False)
 
 
-def _get_user_locations(user):
-    active_logins = user.login_activities.filter(is_active=True)
-    locations = sorted({activity.location_label for activity in active_logins if activity.location_label})
-    return locations or ["No active location recorded"]
-
-
-def _build_login_chart_data():
-    points = []
-    raw_counts = []
-
-    for days_ago in range(6, -1, -1):
-        current_day = timezone.localdate() - timedelta(days=days_ago)
-        count = LoginActivity.objects.filter(created_at__date=current_day).count()
-        raw_counts.append(count)
-        points.append(
-            {
-                "label": current_day.strftime("%a"),
-                "count": count,
-            }
-        )
-
-    max_count = max(raw_counts) if raw_counts else 1
-    max_count = max_count or 1
-
-    for point in points:
-        point["height"] = 34 if point["count"] == 0 else 40 + int((point["count"] / max_count) * 110)
-
-    return points
-
-
-def _build_role_chart_data():
-    admin_count = user_model.objects.filter(is_staff=True).count()
-    member_count = user_model.objects.filter(is_staff=False).count()
-    max_count = max(admin_count, member_count, 1)
-
-    return [
-        {
-            "label": "Administrators",
-            "count": admin_count,
-            "width": max(12, int((admin_count / max_count) * 100)) if admin_count else 12,
-        },
-        {
-            "label": "Members",
-            "count": member_count,
-            "width": max(12, int((member_count / max_count) * 100)) if member_count else 12,
-        },
-    ]
-
-
-def _build_user_rows():
-    rows = []
-
-    for user in user_model.objects.all().order_by("first_name", "last_name", "email", "username"):
-        active_logins = list(user.login_activities.filter(is_active=True))
-        rows.append(
-            {
-                "id": user.id,
-                "display_name": user.get_full_name().strip() or user.username,
-                "user_id": user.email or user.username,
-                "role": "Admin" if user.is_staff else "Member",
-                "status": "Online" if active_logins else "Offline",
-                "device_count": len(active_logins),
-                "locations": _get_user_locations(user),
-                "view_url": reverse("dashboard_user_view", args=[user.id]),
-                "edit_url": reverse("dashboard_user_edit", args=[user.id]),
-                "delete_url": reverse("dashboard_user_delete", args=[user.id]),
-            }
-        )
-
-    return rows
-
-
-def _get_mobile_number(user):
-    profile = UserProfile.objects.filter(user=user).first()
-    return profile.mobile_number if profile and profile.mobile_number else "Not provided"
-
-
-def _extract_report_text(report_path):
-    suffix = Path(report_path).suffix.lower()
-    if suffix in {".txt", ".csv"}:
-        return Path(report_path).read_text(encoding="utf-8", errors="ignore")[:5000]
-    return ""
-
-
-def _build_analysis_trend(analyses_queryset):
-    analyses = list(analyses_queryset.order_by("created_at")[:7])
-    if not analyses:
-        return []
-
-    max_count = max((analysis.detected_conditions_count for analysis in analyses), default=1) or 1
-    trend = []
-    for analysis in analyses:
-        trend.append(
-            {
-                "label": timezone.localtime(analysis.created_at).strftime("%d %b"),
-                "count": analysis.detected_conditions_count,
-                "height": 34
-                if analysis.detected_conditions_count == 0
-                else 40 + int((analysis.detected_conditions_count / max_count) * 110),
-            }
-        )
-
-    return trend
-
-
-def _build_risk_distribution(analyses_queryset):
-    risk_counts = {"High": 0, "Medium": 0, "Low": 0}
-    for analysis in analyses_queryset:
-        if analysis.risk_level in risk_counts:
-            risk_counts[analysis.risk_level] += 1
-
-    max_count = max(risk_counts.values()) if risk_counts else 1
-    max_count = max_count or 1
-    return [
-        {
-            "label": label,
-            "count": count,
-            "width": max(12, int((count / max_count) * 100)) if count else 12,
-        }
-        for label, count in risk_counts.items()
-    ]
-
-
-def _build_treatment_summary_text(text, limit=180):
-    cleaned_text = " ".join((text or "").split())
-    if len(cleaned_text) <= limit:
-        return cleaned_text
-
-    truncated_text = cleaned_text[:limit].rsplit(" ", 1)[0].strip()
-    return f"{truncated_text}..."
-
-
-def _build_public_treatment_summaries(limit=5):
-    summaries = []
-    queryset = (
-        TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
-        .filter(is_approved=True)
-        .order_by("-updated_at")[:limit]
-    )
-
-    for record in queryset:
-        summaries.append(
-            {
-                "condition": record.target_condition or "General review required",
-                "specialization": record.target_specialization or "General medicine",
-                "summary": _build_treatment_summary_text(record.target_treatment),
-                "quality_score": record.quality_score,
-                "updated_at": record.updated_at,
-            }
-        )
-
-    return summaries
-
-
 def _build_otp_delivery_note():
     notes = []
 
@@ -348,293 +109,37 @@ def healthcheck_view(request):
 
 
 def index(request):
-    ensure_demo_setup()
-
-    speech_text = ""
-    doctor_response = ""
-    audio_url = ""
-    error_message = ""
-    submitted_symptoms = ""
-    submitted_report_notes = ""
-    submitted_previous_report_notes = ""
-    report_summary = ""
-    report_comparison = None
-    latest_analysis = None
-    featured_images = FeaturedImage.objects.filter(is_active=True)
-
-    if request.method == "POST":
-        image = request.FILES.get("image")
-        audio = request.FILES.get("audio")
-        report_file = request.FILES.get("report_file")
-        previous_report_file = request.FILES.get("previous_report_file")
-        submitted_symptoms = (request.POST.get("symptoms") or "").strip()
-        submitted_report_notes = (request.POST.get("report_notes") or "").strip()
-        submitted_previous_report_notes = (request.POST.get("previous_report_notes") or "").strip()
-        language = (request.POST.get("language") or "english").strip().lower()
-
-        if submitted_symptoms:
-            speech_text = submitted_symptoms
-
-        encoded_image = None
-        mime_type = "image/jpeg"
-        report_text = submitted_report_notes
-        previous_report_text = submitted_previous_report_notes
-        report_relative_path = ""
-        previous_report_relative_path = ""
-        image_relative_path = ""
-        previous_analysis = (
-            MedicalAnalysis.objects.filter(user=request.user).first()
-            if request.user.is_authenticated
-            else None
-        )
-
-        try:
-            if audio:
-                audio_suffix = Path(audio.name).suffix.lower() or ".webm"
-                audio_filename = f"{uuid.uuid4()}{audio_suffix}"
-                audio_path = _save_uploaded_file(audio, "audio_inputs", audio_filename)
-                speech_text = transcribe_with_groq(
-                    stt_model="whisper-large-v3",
-                    audio_filepath=str(audio_path),
-                    GROQ_API_KEY=os.environ.get("GROQ_API_KEY"),
-                )
-
-            if image:
-                image_suffix = Path(image.name).suffix.lower() or ".jpg"
-                image_filename = f"{uuid.uuid4()}{image_suffix}"
-                image_path = _save_uploaded_file(image, "clinical_images", image_filename)
-                encoded_image, mime_type = encode_image(image_path)
-                image_relative_path = _build_media_relative_path(image_path)
-
-            if report_file:
-                report_suffix = Path(report_file.name).suffix.lower() or ".txt"
-                report_filename = f"{uuid.uuid4()}{report_suffix}"
-                saved_report_path = _save_uploaded_file(report_file, "medical_reports", report_filename)
-                report_relative_path = _build_media_relative_path(saved_report_path)
-                extracted_report_text = _extract_report_text(saved_report_path)
-                if extracted_report_text:
-                    report_text = "\n\n".join(part for part in [submitted_report_notes, extracted_report_text] if part)
-
-            if previous_report_file:
-                previous_report_suffix = Path(previous_report_file.name).suffix.lower() or ".txt"
-                previous_report_filename = f"{uuid.uuid4()}{previous_report_suffix}"
-                saved_previous_report_path = _save_uploaded_file(
-                    previous_report_file,
-                    "medical_reports",
-                    previous_report_filename,
-                )
-                previous_report_relative_path = _build_media_relative_path(saved_previous_report_path)
-                extracted_previous_report_text = _extract_report_text(saved_previous_report_path)
-                if extracted_previous_report_text:
-                    previous_report_text = "\n\n".join(
-                        part
-                        for part in [submitted_previous_report_notes, extracted_previous_report_text]
-                        if part
-                    )
-
-            if speech_text or encoded_image or report_text:
-                doctor_response = analyze_image_with_query(
-                    query=_build_summary_prompt(
-                        "\n\n".join(part for part in [speech_text, report_text] if part),
-                        language,
-                    ),
-                    encoded_image=encoded_image,
-                    model=MEDICAL_MODEL,
-                    mime_type=mime_type,
-                )
-                report_summary = doctor_response
-
-                analysis_source_text = "\n\n".join(part for part in [speech_text, report_text] if part)
-                report_insights = analyze_report_text(analysis_source_text)
-                image_insights = analyze_image_record(image_relative_path)
-                current_report_insights = analyze_report_text(report_text or analysis_source_text)
-                previous_report_insights = (
-                    analyze_report_text(previous_report_text)
-                    if previous_report_text
-                    else {"disease_percentage": None}
-                )
-                report_comparison = compare_disease_levels(
-                    current_report_insights.get("disease_percentage"),
-                    previous_report_insights.get("disease_percentage")
-                    if previous_report_text
-                    else (previous_analysis.disease_percentage if previous_analysis else None),
-                )
-
-                try:
-                    audio_filename = f"{uuid.uuid4()}_response.mp3"
-                    generated_audio_path = Path(settings.MEDIA_ROOT) / "generated_audio" / audio_filename
-                    generated_audio_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    text_to_speech_with_edge(
-                        input_text=doctor_response,
-                        output_filepath=str(generated_audio_path),
-                        language=language,
-                    )
-                    audio_url = _build_media_url(generated_audio_path)
-                except Exception:
-                    error_message = (
-                        "The written response is ready, but voice playback could not be generated right now."
-                    )
-
-                latest_analysis = MedicalAnalysis.objects.create(
-                    user=request.user if request.user.is_authenticated else None,
-                    title=f"Clinical Analysis {timezone.localtime().strftime('%d %b %Y %H:%M')}",
-                    symptoms_text=submitted_symptoms,
-                    transcription_text=speech_text if audio else "",
-                    report_text=report_text,
-                    report_file=report_relative_path,
-                    previous_report_text=previous_report_text,
-                    previous_report_file=previous_report_relative_path,
-                    medical_image=image_relative_path,
-                    ai_summary=doctor_response,
-                    predicted_condition=(
-                        image_insights["predicted_condition"]
-                        if image_relative_path
-                        and report_insights["predicted_condition"] == "General review required"
-                        else report_insights["predicted_condition"]
-                    ),
-                    detected_conditions_count=report_insights["detected_conditions_count"]
-                    + (1 if image_relative_path else 0),
-                    risk_level=report_insights["risk_level"],
-                    confidence_score=max(
-                        report_insights["confidence_score"],
-                        image_insights["confidence_score"],
-                    ),
-                    disease_percentage=current_report_insights.get("disease_percentage"),
-                    previous_disease_percentage=(
-                        report_comparison["previous_percentage"] if report_comparison else None
-                    ),
-                    percentage_reduced=(
-                        report_comparison["decrease_percentage"] if report_comparison else None
-                    ),
-                    percentage_remaining=(
-                        report_comparison["remaining_percentage"]
-                        if report_comparison
-                        else current_report_insights.get("disease_percentage")
-                    ),
-                    progression_status="Baseline",
-                    model_source=(
-                        report_insights["model_source"]
-                        if report_insights["model_source"] == "trained-model"
-                        or image_insights["model_source"] != "trained-model"
-                        else image_insights["model_source"]
-                    ),
-                )
-
-                comparison = compare_analyses(latest_analysis, previous_analysis)
-                latest_analysis.progression_status = comparison["status"]
-                latest_analysis.save(update_fields=["progression_status"])
-                if comparison.get("has_percentage_data"):
-                    report_comparison = comparison
-            else:
-                error_message = "Provide symptoms, a voice recording, or an image before running analysis."
-        except Exception:
-            doctor_response = ""
-            audio_url = ""
-            error_message = (
-                "We could not complete the analysis right now. Please verify your AI service "
-                "configuration and try again."
-            )
-
-    return render(
+    context = process_clinical_intake(
         request,
-        "index.html",
-        {
-            "speech_text": speech_text,
-            "doctor_response": doctor_response,
-            "audio_url": audio_url,
-            "error_message": error_message,
-            "submitted_symptoms": submitted_symptoms,
-            "submitted_report_notes": submitted_report_notes,
-            "submitted_previous_report_notes": submitted_previous_report_notes,
-            "report_summary": report_summary,
-            "report_comparison": report_comparison,
-            "latest_analysis": latest_analysis,
-            "featured_images": featured_images,
-        },
+        featured_images=get_featured_images(),
+        ai_analyzer=analyze_image_with_query,
+        speech_to_text=transcribe_with_groq,
+        text_to_speech=text_to_speech_with_edge,
+        image_encoder=encode_image,
     )
+    return render(request, "index.html", context)
+
+
+def report_intake_view(request):
+    context = process_clinical_intake(
+        request,
+        featured_images=[],
+        ai_analyzer=analyze_image_with_query,
+        speech_to_text=transcribe_with_groq,
+        text_to_speech=text_to_speech_with_edge,
+        image_encoder=encode_image,
+    )
+    return render(request, "report_intake.html", context)
 
 
 @login_required
 def dashboard_view(request):
-    ensure_demo_setup()
-
-    current_user_logins = request.user.login_activities.filter(is_active=True)
-    analysis_queryset = _get_analysis_queryset_for_user(request.user)
-    training_queryset = TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
-    approved_training_queryset = training_queryset.filter(is_approved=True)
-    model_evaluation_report = load_evaluation_report()
-    latest_analysis = analysis_queryset.first()
-    previous_analysis = analysis_queryset[1] if analysis_queryset.count() > 1 else None
-    analysis_comparison = compare_analyses(latest_analysis, previous_analysis)
-    recent_analyses = analysis_queryset[:5]
-    public_treatment_summaries = _build_public_treatment_summaries()
-
-    dashboard_stats = [
-        {
-            "label": "Registered users",
-            "value": user_model.objects.count(),
-            "helper": "Total members stored in the platform",
-        },
-        {
-            "label": "Active devices",
-            "value": LoginActivity.objects.filter(is_active=True).count(),
-            "helper": "Currently signed-in sessions across users",
-        },
-        {
-            "label": "Medical analyses",
-            "value": MedicalAnalysis.objects.count(),
-            "helper": "Saved report and image analysis records",
-        },
-        {
-            "label": "Treatments logged",
-            "value": TreatmentEntry.objects.count(),
-            "helper": "Doctor treatment actions captured in the audit log",
-        },
-        {
-            "label": "Training-ready records",
-            "value": approved_training_queryset.count(),
-            "helper": "Doctor-reviewed cases available for ML model updates",
-        },
-    ]
-
-    current_user_summary = {
-        "display_name": request.user.get_full_name().strip() or request.user.username,
-        "user_id": request.user.email or request.user.username,
-        "mobile_number": _get_mobile_number(request.user),
-        "role": "Admin" if request.user.is_staff else "Member",
-        "device_count": current_user_logins.count(),
-        "locations": _get_user_locations(request.user),
-    }
-
-    context = {
-        "dashboard_stats": dashboard_stats,
-        "current_user_summary": current_user_summary,
-        "current_user_logins": current_user_logins,
-        "login_chart_data": _build_login_chart_data(),
-        "role_chart_data": _build_role_chart_data(),
-        "analysis_chart_data": _build_analysis_trend(analysis_queryset),
-        "risk_distribution": _build_risk_distribution(analysis_queryset),
-        "analysis_comparison": analysis_comparison,
-        "latest_analysis": latest_analysis,
-        "recent_analyses": recent_analyses,
-        "public_treatment_summaries": public_treatment_summaries,
-        "training_dataset_summary": {
-            "record_count": training_queryset.count(),
-            "approved_count": approved_training_queryset.count(),
-            "average_quality": int(approved_training_queryset.aggregate(avg=Avg("quality_score"))["avg"] or 0),
-            "latest_synced_at": approved_training_queryset.first().updated_at if approved_training_queryset.exists() else None,
-        },
-        "model_evaluation_summary": model_evaluation_report,
-        "user_rows": _build_user_rows() if request.user.is_staff else [],
-    }
-
-    return render(request, "dashboard.html", context)
+    return render(request, "dashboard.html", build_dashboard_context(request.user))
 
 
 @login_required
 def chat_view(request):
-    session = _get_session_for_request(request)
+    session = get_or_create_session_for_user(request.user)
 
     if request.method == "POST":
         form = ChatForm(request.POST, request.FILES)
@@ -646,50 +151,23 @@ def chat_view(request):
             if not message and not attachment:
                 form.add_error(None, "Enter a message or attach a file before sending.")
             else:
-                user_message = ChatMessage.objects.create(
+                chat_result = process_chat_message(
                     session=session,
-                    role="user",
-                    text=message,
+                    message=message,
                     attachment=attachment,
+                    ai_analyzer=analyze_image_with_query,
+                    image_encoder=encode_image,
+                    local_qa_answerer=answer_question,
+                    user_profile=get_user_profile(request.user),
                 )
-
-                encoded_image = None
-                mime_type = "image/jpeg"
-
-                if user_message.attachment:
-                    attachment_suffix = Path(user_message.attachment.name).suffix.lower()
-                    if attachment_suffix in {".jpg", ".jpeg", ".png"}:
-                        encoded_image, mime_type = encode_image(user_message.attachment.path)
-
-                prompt_text = message or (
-                    "The patient attached a file for context. Acknowledge the upload and explain "
-                    "what additional details are needed to give a useful medical response."
-                )
-
-                try:
-                    ai_response = analyze_image_with_query(
-                        query=_build_chat_prompt(prompt_text),
-                        encoded_image=encoded_image,
-                        model=MEDICAL_MODEL,
-                        mime_type=mime_type,
-                    )
-                except Exception:
-                    ai_response = (
-                        "I could not generate a response right now. Please try again in a moment."
-                    )
+                if chat_result["had_remote_error"]:
                     messages.error(request, "The assistant could not generate a response right now.")
-
-                ChatMessage.objects.create(
-                    session=session,
-                    role="assistant",
-                    text=ai_response,
-                )
 
                 return redirect("chat")
     else:
         form = ChatForm()
 
-    history = _serialize_history(session.messages.all().order_by("created_at"))
+    history = serialize_history(session.messages.all().order_by("created_at"))
     attachment_count = sum(1 for item in history if item["attachment_url"])
     return render(
         request,
@@ -704,25 +182,21 @@ def chat_view(request):
 
 @login_required
 def history_view(request):
-    sessions = ChatSession.objects.filter(user=request.user).order_by("-created_at")
-    session_id = request.GET.get("session_id")
-    selected_session = sessions.filter(id=session_id).first() if session_id else sessions.first()
-    messages_list = selected_session.messages.all().order_by("created_at") if selected_session else []
-
     return render(
         request,
         "history.html",
-        {
-            "sessions": sessions,
-            "selected_session": selected_session,
-            "messages": messages_list,
-        },
+        build_history_context(
+            request.user,
+            request.GET.get("session_id"),
+            request.GET.get("search"),
+            request.GET.get("risk"),
+        ),
     )
 
 
 @login_required
 def analysis_detail_view(request, analysis_id):
-    queryset = _get_analysis_queryset_for_user(request.user)
+    queryset = get_visible_analysis_queryset(request.user)
     analysis = get_object_or_404(queryset, pk=analysis_id)
     treatment_form = TreatmentEntryForm(request.POST or None)
 
@@ -759,7 +233,7 @@ def analysis_detail_view(request, analysis_id):
 
 @login_required
 def treatment_entry_edit_view(request, analysis_id, treatment_id):
-    analysis = get_object_or_404(_get_analysis_queryset_for_user(request.user), pk=analysis_id)
+    analysis = get_object_or_404(get_visible_analysis_queryset(request.user), pk=analysis_id)
     treatment_entry = get_object_or_404(TreatmentEntry, pk=treatment_id, analysis=analysis)
     form = TreatmentEntryForm(request.POST or None, instance=treatment_entry)
 
@@ -787,7 +261,7 @@ def treatment_entry_edit_view(request, analysis_id, treatment_id):
 
 @login_required
 def treatment_entry_delete_view(request, analysis_id, treatment_id):
-    analysis = get_object_or_404(_get_analysis_queryset_for_user(request.user), pk=analysis_id)
+    analysis = get_object_or_404(get_visible_analysis_queryset(request.user), pk=analysis_id)
     treatment_entry = get_object_or_404(TreatmentEntry, pk=treatment_id, analysis=analysis)
 
     if request.method == "POST":
@@ -806,8 +280,6 @@ def treatment_entry_delete_view(request, analysis_id, treatment_id):
 
 
 def login_view(request):
-    ensure_demo_setup()
-
     if request.user.is_authenticated:
         return redirect("dashboard")
 
@@ -835,13 +307,14 @@ def login_view(request):
         {
             "form": form,
             "next": next_url,
+            "google_login_enabled": bool(
+                settings.GOOGLE_OAUTH_CLIENT_ID and settings.GOOGLE_OAUTH_CLIENT_SECRET
+            ),
         },
     )
 
 
 def register_view(request):
-    ensure_demo_setup()
-
     if request.user.is_authenticated:
         return redirect("dashboard")
 
@@ -878,8 +351,6 @@ def register_view(request):
 
 
 def register_verify_view(request, token):
-    ensure_demo_setup()
-
     if request.user.is_authenticated:
         return redirect("dashboard")
 
@@ -973,6 +444,7 @@ def change_credentials_view(request):
         {
             "profile_form": profile_form,
             "password_form": password_form,
+            **build_profile_workspace_context(request.user),
         },
     )
 
@@ -988,8 +460,8 @@ def dashboard_user_view(request, user_id):
         {
             "managed_user": managed_user,
             "active_logins": active_logins,
-            "locations": _get_user_locations(managed_user),
-            "mobile_number": _get_mobile_number(managed_user),
+            "locations": get_user_locations(managed_user),
+            "mobile_number": get_mobile_number(managed_user),
         },
     )
 

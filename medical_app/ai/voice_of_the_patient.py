@@ -1,12 +1,12 @@
-from dotenv import load_dotenv
-load_dotenv()
-
-import os
-import speech_recognition as sr
-from pydub import AudioSegment
-from io import BytesIO
-from groq import Groq
 import logging
+import os
+from io import BytesIO
+
+import speech_recognition as sr
+from dotenv import load_dotenv
+from groq import Groq
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 
@@ -15,10 +15,12 @@ logging.basicConfig(level=logging.INFO)
 # ------------------------------------------------
 
 def record_audio(file_path, timeout=20, phrase_time_limit=None):
-
     recognizer = sr.Recognizer()
 
     try:
+        # Import lazily so normal web requests do not require ffmpeg/pydub.
+        from pydub import AudioSegment
+
         with sr.Microphone() as source:
             logging.info("Adjusting noise level...")
             recognizer.adjust_for_ambient_noise(source, duration=1)

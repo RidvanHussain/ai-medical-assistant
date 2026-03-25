@@ -12,6 +12,7 @@
     <title>{% block title %}AI Medical Assistant{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="{% static 'img/medical-assistant-logo.svg' %}">
     <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    {% block extra_css %}{% endblock %}
 </head>
 <body>
     <div class="app-shell">
@@ -156,6 +157,7 @@
         </footer>
     </div>
 
-    <script src="{% static 'js/main.js' %}"></script>
+    <script src="{% static 'js/main.js' %}" defer></script>
+    {% block extra_js %}{% endblock %}
 </body>
 </html>

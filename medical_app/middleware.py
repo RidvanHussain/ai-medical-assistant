@@ -1,4 +1,13 @@
+from datetime import timedelta
+
+from django.utils import timezone
+
 from .models import LoginActivity, UserProfile
+
+
+LOGIN_ACTIVITY_SYNC_INTERVAL = timedelta(minutes=5)
+LAST_SYNC_SESSION_KEY = "medical_app_login_sync_ts"
+LAST_FINGERPRINT_SESSION_KEY = "medical_app_login_sync_fingerprint"
 
 
 def _get_client_ip(request):
@@ -64,27 +73,56 @@ class CurrentLoginActivityMiddleware:
             ip_address = _get_client_ip(request)
             user_agent = request.META.get("HTTP_USER_AGENT", "")
             location_label = _build_location_label(ip_address)
+            activity_defaults = {
+                "ip_address": ip_address,
+                "location_label": location_label,
+                "device_name": _build_device_name(user_agent),
+                "browser_name": _build_browser_name(user_agent),
+                "user_agent": user_agent[:1000],
+                "is_active": True,
+            }
+            current_fingerprint = "|".join(
+                [
+                    activity_defaults["ip_address"],
+                    activity_defaults["location_label"],
+                    activity_defaults["device_name"],
+                    activity_defaults["browser_name"],
+                ]
+            )
+            last_sync_timestamp = float(request.session.get(LAST_SYNC_SESSION_KEY, 0) or 0)
+            now_timestamp = timezone.now().timestamp()
+            should_refresh = (
+                request.session.get(LAST_FINGERPRINT_SESSION_KEY) != current_fingerprint
+                or (now_timestamp - last_sync_timestamp) >= LOGIN_ACTIVITY_SYNC_INTERVAL.total_seconds()
+            )
 
-            LoginActivity.objects.update_or_create(
+            activity, created = LoginActivity.objects.get_or_create(
                 user=request.user,
                 session_key=session_key,
-                defaults={
-                    "ip_address": ip_address,
-                    "location_label": location_label,
-                    "device_name": _build_device_name(user_agent),
-                    "browser_name": _build_browser_name(user_agent),
-                    "user_agent": user_agent[:1000],
-                    "is_active": True,
-                },
+                defaults=activity_defaults,
             )
 
-            existing_profile = UserProfile.objects.filter(user=request.user).first()
-            UserProfile.objects.update_or_create(
+            if created:
+                should_refresh = False
+            elif should_refresh:
+                updated_fields = []
+                for field_name, field_value in activity_defaults.items():
+                    if getattr(activity, field_name) != field_value:
+                        setattr(activity, field_name, field_value)
+                        updated_fields.append(field_name)
+                activity.last_seen = timezone.now()
+                updated_fields.append("last_seen")
+                activity.save(update_fields=updated_fields)
+
+            profile, _ = UserProfile.objects.get_or_create(
                 user=request.user,
-                defaults={
-                    "mobile_number": existing_profile.mobile_number if existing_profile else "",
-                    "last_known_location": location_label,
-                },
+                defaults={"mobile_number": "", "last_known_location": location_label},
             )
+            if should_refresh and profile.last_known_location != location_label:
+                profile.last_known_location = location_label
+                profile.save(update_fields=["last_known_location", "updated_at"])
+
+            request.session[LAST_SYNC_SESSION_KEY] = now_timestamp
+            request.session[LAST_FINGERPRINT_SESSION_KEY] = current_fingerprint
 
         return self.get_response(request)

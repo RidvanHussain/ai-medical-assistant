@@ -1,6 +1,11 @@
 {% extends 'base.html' %}
+{% load static %}
 
 {% block title %}Patient Chat{% endblock %}
+
+{% block extra_js %}
+    <script src="{% static 'js/chat.js' %}" defer></script>
+{% endblock %}
 
 {% block content %}
     <section class="page-intro page-intro-compact">

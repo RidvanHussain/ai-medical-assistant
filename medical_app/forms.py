@@ -38,6 +38,51 @@ MOBILE_FIELD_ATTRS = {
     "title": "Enter a valid mobile number with 10 to 15 digits.",
 }
 
+LONG_TEXTAREA_ATTRS = {
+    "rows": 4,
+    "class": "auto-expand",
+}
+
+LANGUAGE_CHOICES = [
+    ("english", "English"),
+    ("hindi", "Hindi"),
+    ("urdu", "Urdu"),
+    ("arabic", "Arabic"),
+    ("bengali", "Bengali"),
+]
+
+RESPONSE_STYLE_CHOICES = [
+    ("balanced", "Balanced"),
+    ("concise", "Concise"),
+    ("detailed", "Detailed"),
+    ("reassuring", "Reassuring"),
+    ("clinical", "Clinical"),
+]
+
+AI_RISK_CHOICES = [
+    ("balanced", "Balanced"),
+    ("conservative", "Conservative"),
+    ("proactive", "Proactive alerts"),
+]
+
+NOTIFICATION_CHOICES = [
+    ("important_only", "Important only"),
+    ("analysis_updates", "Analysis updates"),
+    ("full_digest", "Full digest"),
+]
+
+PRIVACY_CHOICES = [
+    ("standard", "Standard"),
+    ("private", "Private"),
+    ("strict", "Strict"),
+]
+
+PERFORMANCE_CHOICES = [
+    ("balanced", "Balanced"),
+    ("fast", "Fast"),
+    ("quality", "High quality"),
+]
+
 
 def _build_unique_username(seed_value):
     base_username = slugify(seed_value).replace("-", "") or "member"
@@ -259,6 +304,110 @@ class ProfileSettingsForm(forms.ModelForm):
             }
         ),
     )
+    date_of_birth = forms.DateField(
+        label="Date of Birth",
+        required=False,
+        widget=forms.DateInput(
+            attrs={
+                "type": "date",
+            }
+        ),
+    )
+    gender = forms.ChoiceField(
+        label="Gender",
+        required=False,
+        choices=UserProfile.GENDER_CHOICES,
+    )
+    blood_group = forms.CharField(
+        label="Blood Group",
+        required=False,
+        max_length=10,
+        widget=forms.TextInput(
+            attrs={
+                **TEXT_INPUT_ATTRS,
+                "placeholder": "A+, O-, B+, AB+",
+            }
+        ),
+    )
+    allergies = forms.CharField(
+        label="Allergies",
+        required=False,
+        widget=forms.Textarea(
+            attrs={
+                **LONG_TEXTAREA_ATTRS,
+                "placeholder": "Food, medicines, environment, or other allergies",
+            }
+        ),
+    )
+    chronic_conditions = forms.CharField(
+        label="Chronic Conditions",
+        required=False,
+        widget=forms.Textarea(
+            attrs={
+                **LONG_TEXTAREA_ATTRS,
+                "placeholder": "Diabetes, asthma, thyroid, hypertension, etc.",
+            }
+        ),
+    )
+    current_medications = forms.CharField(
+        label="Current Medications",
+        required=False,
+        widget=forms.Textarea(
+            attrs={
+                **LONG_TEXTAREA_ATTRS,
+                "placeholder": "Current medicines, supplements, or therapy notes",
+            }
+        ),
+    )
+    emergency_contact = forms.CharField(
+        label="Emergency Contact",
+        required=False,
+        max_length=120,
+        widget=forms.TextInput(
+            attrs={
+                **TEXT_INPUT_ATTRS,
+                "placeholder": "Name / number / relationship",
+            }
+        ),
+    )
+    language_preference = forms.ChoiceField(
+        label="Preferred Language",
+        choices=LANGUAGE_CHOICES,
+        required=False,
+    )
+    response_style = forms.ChoiceField(
+        label="Response Style",
+        choices=RESPONSE_STYLE_CHOICES,
+        required=False,
+    )
+    ai_risk_preference = forms.ChoiceField(
+        label="AI Behavior",
+        choices=AI_RISK_CHOICES,
+        required=False,
+    )
+    notification_preference = forms.ChoiceField(
+        label="Notifications",
+        choices=NOTIFICATION_CHOICES,
+        required=False,
+    )
+    privacy_mode = forms.ChoiceField(
+        label="Privacy",
+        choices=PRIVACY_CHOICES,
+        required=False,
+    )
+    performance_mode = forms.ChoiceField(
+        label="Performance",
+        choices=PERFORMANCE_CHOICES,
+        required=False,
+    )
+    voice_summary_enabled = forms.BooleanField(
+        label="Enable voice summaries",
+        required=False,
+    )
+    auto_compare_reports = forms.BooleanField(
+        label="Auto compare reports",
+        required=False,
+    )
 
     class Meta:
         model = user_model
@@ -290,7 +439,28 @@ class ProfileSettingsForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         if self.instance.pk:
             existing_profile = UserProfile.objects.filter(user=self.instance).first()
-            self.fields["mobile_number"].initial = existing_profile.mobile_number if existing_profile else ""
+            if existing_profile:
+                self.fields["mobile_number"].initial = existing_profile.mobile_number
+                for field_name in (
+                    "date_of_birth",
+                    "gender",
+                    "blood_group",
+                    "allergies",
+                    "chronic_conditions",
+                    "current_medications",
+                    "emergency_contact",
+                    "language_preference",
+                    "response_style",
+                    "ai_risk_preference",
+                    "notification_preference",
+                    "privacy_mode",
+                    "performance_mode",
+                    "voice_summary_enabled",
+                    "auto_compare_reports",
+                ):
+                    self.fields[field_name].initial = getattr(existing_profile, field_name)
+            else:
+                self.fields["mobile_number"].initial = ""
 
     def clean_email(self):
         email = self.cleaned_data["email"].strip().lower()
@@ -316,7 +486,24 @@ class ProfileSettingsForm(forms.ModelForm):
             user.save()
             UserProfile.objects.update_or_create(
                 user=user,
-                defaults={"mobile_number": self.cleaned_data["mobile_number"].strip()},
+                defaults={
+                    "mobile_number": self.cleaned_data["mobile_number"].strip(),
+                    "date_of_birth": self.cleaned_data.get("date_of_birth"),
+                    "gender": self.cleaned_data.get("gender", ""),
+                    "blood_group": (self.cleaned_data.get("blood_group") or "").strip(),
+                    "allergies": (self.cleaned_data.get("allergies") or "").strip(),
+                    "chronic_conditions": (self.cleaned_data.get("chronic_conditions") or "").strip(),
+                    "current_medications": (self.cleaned_data.get("current_medications") or "").strip(),
+                    "emergency_contact": (self.cleaned_data.get("emergency_contact") or "").strip(),
+                    "language_preference": self.cleaned_data.get("language_preference") or "english",
+                    "response_style": self.cleaned_data.get("response_style") or "balanced",
+                    "ai_risk_preference": self.cleaned_data.get("ai_risk_preference") or "balanced",
+                    "notification_preference": self.cleaned_data.get("notification_preference") or "important_only",
+                    "privacy_mode": self.cleaned_data.get("privacy_mode") or "standard",
+                    "performance_mode": self.cleaned_data.get("performance_mode") or "balanced",
+                    "voice_summary_enabled": bool(self.cleaned_data.get("voice_summary_enabled")),
+                    "auto_compare_reports": bool(self.cleaned_data.get("auto_compare_reports")),
+                },
             )
 
         return user

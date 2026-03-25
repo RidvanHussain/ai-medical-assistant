@@ -1,0 +1,638 @@
+from datetime import timedelta
+
+from django.contrib.auth import get_user_model
+from django.core.cache import cache
+from django.db.models import Avg, Count, Prefetch, Q
+from django.urls import reverse
+from django.utils import timezone
+
+from medical_app.analysis_engine import compare_analyses
+from medical_app.model_evaluation import load_evaluation_report
+from medical_app.models import (
+    ChatMessage,
+    ChatSession,
+    FeaturedImage,
+    LoginActivity,
+    MedicalAnalysis,
+    TreatmentEntry,
+    TreatmentTrainingRecord,
+    UserProfile,
+)
+
+
+FEATURED_IMAGES_CACHE_SECONDS = 300
+DASHBOARD_CACHE_SECONDS = 60
+FEATURED_IMAGES_VERSION_KEY = "medical_app:featured_images:version"
+DASHBOARD_VERSION_KEY = "medical_app:dashboard:version"
+DONUT_PALETTE = ["#2563eb", "#10b981", "#f59e0b", "#dc2626", "#7c3aed", "#06b6d4"]
+
+user_model = get_user_model()
+
+
+def _get_cache_version(version_key):
+    version = cache.get(version_key)
+    if version is None:
+        version = 1
+        cache.set(version_key, version, None)
+    return version
+
+
+def bump_featured_images_cache_version():
+    cache.set(FEATURED_IMAGES_VERSION_KEY, _get_cache_version(FEATURED_IMAGES_VERSION_KEY) + 1, None)
+
+
+def bump_dashboard_cache_version():
+    cache.set(DASHBOARD_VERSION_KEY, _get_cache_version(DASHBOARD_VERSION_KEY) + 1, None)
+
+
+def get_featured_images():
+    version = _get_cache_version(FEATURED_IMAGES_VERSION_KEY)
+    cache_key = f"medical_app:featured_images:{version}"
+    featured_images = cache.get(cache_key)
+    if featured_images is None:
+        featured_images = list(FeaturedImage.objects.filter(is_active=True).order_by("display_order", "title"))
+        cache.set(cache_key, featured_images, FEATURED_IMAGES_CACHE_SECONDS)
+    return featured_images
+
+
+def get_visible_analysis_queryset(user):
+    base_queryset = MedicalAnalysis.objects.select_related("user")
+    if user.is_staff:
+        return base_queryset
+    return base_queryset.filter(user=user)
+
+
+def get_mobile_number(user):
+    profile = getattr(user, "profile", None)
+    if profile and profile.mobile_number:
+        return profile.mobile_number
+
+    profile = UserProfile.objects.filter(user=user).only("mobile_number").first()
+    return profile.mobile_number if profile and profile.mobile_number else "Not provided"
+
+
+def get_user_locations(user):
+    active_logins = user.login_activities.filter(is_active=True).only("location_label")
+    locations = sorted({activity.location_label for activity in active_logins if activity.location_label})
+    return locations or ["No active location recorded"]
+
+
+def _build_login_chart_data():
+    start_date = timezone.localdate() - timedelta(days=6)
+    counts = (
+        LoginActivity.objects.filter(created_at__date__gte=start_date)
+        .values("created_at__date")
+        .annotate(count=Count("id"))
+    )
+    count_map = {row["created_at__date"]: row["count"] for row in counts}
+    raw_counts = []
+    points = []
+
+    for offset in range(7):
+        current_day = start_date + timedelta(days=offset)
+        count = count_map.get(current_day, 0)
+        raw_counts.append(count)
+        points.append({"label": current_day.strftime("%a"), "count": count})
+
+    max_count = max(raw_counts, default=1) or 1
+    for point in points:
+        point["height"] = 34 if point["count"] == 0 else 40 + int((point["count"] / max_count) * 110)
+    return points
+
+
+def _build_analysis_trend(analysis_queryset):
+    analyses = list(analysis_queryset.order_by("-created_at")[:7])
+    analyses.reverse()
+    if not analyses:
+        return []
+
+    max_count = max((analysis.detected_conditions_count for analysis in analyses), default=1) or 1
+    trend = []
+    for analysis in analyses:
+        trend.append(
+            {
+                "label": timezone.localtime(analysis.created_at).strftime("%d %b"),
+                "count": analysis.detected_conditions_count,
+                "height": 34
+                if analysis.detected_conditions_count == 0
+                else 40 + int((analysis.detected_conditions_count / max_count) * 110),
+            }
+        )
+    return trend
+
+
+def _build_risk_counts(analysis_queryset):
+    risk_counts = {"High": 0, "Medium": 0, "Low": 0}
+    for row in analysis_queryset.values("risk_level").annotate(count=Count("id")):
+        risk_level = row["risk_level"]
+        if risk_level in risk_counts:
+            risk_counts[risk_level] = row["count"]
+    return risk_counts
+
+
+def _build_risk_distribution(analysis_queryset):
+    risk_counts = _build_risk_counts(analysis_queryset)
+    max_count = max(risk_counts.values(), default=1) or 1
+    return [
+        {
+            "label": label,
+            "count": count,
+            "width": max(12, int((count / max_count) * 100)) if count else 12,
+        }
+        for label, count in risk_counts.items()
+    ]
+
+
+def _build_treatment_summary_text(text, limit=180):
+    cleaned_text = " ".join((text or "").split())
+    if len(cleaned_text) <= limit:
+        return cleaned_text
+
+    truncated_text = cleaned_text[:limit].rsplit(" ", 1)[0].strip()
+    return f"{truncated_text}..."
+
+
+def _build_public_treatment_summaries(limit=5):
+    queryset = (
+        TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
+        .filter(is_approved=True)
+        .order_by("-updated_at")[:limit]
+    )
+    return [
+        {
+            "condition": record.target_condition or "General review required",
+            "specialization": record.target_specialization or "General medicine",
+            "summary": _build_treatment_summary_text(record.target_treatment),
+            "quality_score": record.quality_score,
+            "updated_at": record.updated_at,
+        }
+        for record in queryset
+    ]
+
+
+def _build_user_rows():
+    users = (
+        user_model.objects.select_related("profile")
+        .prefetch_related(
+            Prefetch(
+                "login_activities",
+                queryset=LoginActivity.objects.filter(is_active=True).only("user_id", "location_label"),
+                to_attr="active_login_activities",
+            )
+        )
+        .order_by("first_name", "last_name", "email", "username")
+    )
+
+    rows = []
+    for user in users:
+        active_logins = list(getattr(user, "active_login_activities", []))
+        locations = sorted({activity.location_label for activity in active_logins if activity.location_label})
+        rows.append(
+            {
+                "id": user.id,
+                "display_name": user.get_full_name().strip() or user.username,
+                "user_id": user.email or user.username,
+                "role": "Admin" if user.is_staff else "Member",
+                "status": "Online" if active_logins else "Offline",
+                "device_count": len(active_logins),
+                "locations": locations or ["No active location recorded"],
+                "view_url": reverse("dashboard_user_view", args=[user.id]),
+                "edit_url": reverse("dashboard_user_edit", args=[user.id]),
+                "delete_url": reverse("dashboard_user_delete", args=[user.id]),
+            }
+        )
+    return rows
+
+
+def _build_donut_chart(title, subtitle, items, center_value, center_caption):
+    legend = []
+    non_zero_items = [(label, count) for label, count in items if count > 0]
+    total = sum(count for _, count in non_zero_items)
+
+    if not non_zero_items:
+        return {
+            "title": title,
+            "subtitle": subtitle,
+            "background": "conic-gradient(#d8e2ef 0deg 360deg)",
+            "center_value": center_value,
+            "center_caption": center_caption,
+            "legend": [{"label": "No data yet", "count": 0, "percentage": "0%", "color": "#cbd5e1"}],
+        }
+
+    segments = []
+    start_deg = 0.0
+    for index, (label, count) in enumerate(non_zero_items):
+        color = DONUT_PALETTE[index % len(DONUT_PALETTE)]
+        if index == len(non_zero_items) - 1:
+            end_deg = 360.0
+        else:
+            end_deg = start_deg + ((count / total) * 360)
+        segments.append(f"{color} {start_deg:.2f}deg {end_deg:.2f}deg")
+        legend.append(
+            {
+                "label": label,
+                "count": count,
+                "percentage": f"{round((count / total) * 100)}%",
+                "color": color,
+            }
+        )
+        start_deg = end_deg
+
+    return {
+        "title": title,
+        "subtitle": subtitle,
+        "background": f"conic-gradient({', '.join(segments)})",
+        "center_value": center_value,
+        "center_caption": center_caption,
+        "legend": legend,
+    }
+
+
+def _build_condition_mix(analysis_queryset):
+    raw_counts = list(
+        analysis_queryset.exclude(predicted_condition="")
+        .values("predicted_condition")
+        .annotate(count=Count("id"))
+        .order_by("-count", "predicted_condition")[:4]
+    )
+    items = [
+        (
+            row["predicted_condition"] or "General review required",
+            row["count"],
+        )
+        for row in raw_counts
+    ]
+    total_cases = sum(count for _, count in items)
+    top_label = items[0][0] if items else "No mapped condition"
+    return _build_donut_chart(
+        "Condition Mix",
+        "Most common predicted conditions across saved cases.",
+        items,
+        center_value=str(total_cases),
+        center_caption=top_label,
+    )
+
+
+def _build_model_mix(analysis_queryset):
+    model_counts = {"Trained model": 0, "Heuristic fallback": 0}
+    for row in analysis_queryset.values("model_source").annotate(count=Count("id")):
+        if row["model_source"] == "trained-model":
+            model_counts["Trained model"] += row["count"]
+        else:
+            model_counts["Heuristic fallback"] += row["count"]
+
+    total = sum(model_counts.values())
+    trained_ratio = round((model_counts["Trained model"] / total) * 100) if total else 0
+    return _build_donut_chart(
+        "Model Source",
+        "Runtime split between trained predictions and heuristic safety fallback.",
+        list(model_counts.items()),
+        center_value=f"{trained_ratio}%",
+        center_caption="trained model",
+    )
+
+
+def _build_risk_donut(analysis_queryset):
+    risk_counts = _build_risk_counts(analysis_queryset)
+    total = sum(risk_counts.values())
+    return _build_donut_chart(
+        "Risk Distribution",
+        "Current split of low, medium, and high-risk saved cases.",
+        list(risk_counts.items()),
+        center_value=str(total),
+        center_caption="tracked cases",
+    )
+
+
+def _build_alerts(analysis_queryset, current_user_logins, model_evaluation_summary, approved_training_count):
+    alerts = []
+    high_risk_count = analysis_queryset.filter(risk_level="High").count()
+    if high_risk_count:
+        alerts.append(
+            {
+                "severity": "high",
+                "title": "High-risk follow-up pending",
+                "message": f"{high_risk_count} saved case(s) are currently tagged as high risk.",
+            }
+        )
+
+    low_confidence_count = analysis_queryset.filter(confidence_score__lt=0.55).count()
+    if low_confidence_count:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "Low-confidence analyses detected",
+                "message": f"{low_confidence_count} case(s) may need clinician review or richer input data.",
+            }
+        )
+
+    if len(current_user_logins) > 2:
+        alerts.append(
+            {
+                "severity": "info",
+                "title": "Multiple active devices",
+                "message": f"{len(current_user_logins)} devices are currently signed in under this account.",
+            }
+        )
+
+    if model_evaluation_summary and model_evaluation_summary.get("accuracy_percent", 0) < 60:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "Model quality can be improved",
+                "message": "Classifier accuracy is still modest. Add more reviewed cases for stronger supervision.",
+            }
+        )
+
+    if approved_training_count < 10:
+        alerts.append(
+            {
+                "severity": "info",
+                "title": "Training dataset is still small",
+                "message": "Approved treatment records remain limited, so ML generalization is still narrow.",
+            }
+        )
+
+    return alerts
+
+
+def _build_history_highlights(analysis_queryset, limit=4):
+    analyses = list(
+        analysis_queryset.prefetch_related(
+            Prefetch(
+                "treatments",
+                queryset=TreatmentEntry.objects.select_related("added_by").order_by("-created_at"),
+                to_attr="prefetched_treatments",
+            )
+        ).order_by("-created_at")[:limit]
+    )
+    highlights = []
+    for analysis in analyses:
+        latest_treatment = analysis.prefetched_treatments[0] if analysis.prefetched_treatments else None
+        highlights.append(
+            {
+                "analysis": analysis,
+                "risk_css": (analysis.risk_level or "unknown").lower(),
+                "doctor_note": (
+                    _build_treatment_summary_text(latest_treatment.treatment_notes, limit=120)
+                    if latest_treatment
+                    else "Awaiting doctor-reviewed treatment notes."
+                ),
+                "doctor_label": (
+                    f"{latest_treatment.doctor_name} ({latest_treatment.specialization})"
+                    if latest_treatment
+                    else "AI-only record"
+                ),
+                "view_url": reverse("analysis_detail", args=[analysis.id]),
+            }
+        )
+    return highlights
+
+
+def build_dashboard_context(user):
+    version = _get_cache_version(DASHBOARD_VERSION_KEY)
+    cache_key = f"medical_app:dashboard:{version}:user:{user.id}:staff:{int(user.is_staff)}"
+    context = cache.get(cache_key)
+    if context is not None:
+        return context
+
+    analysis_queryset = (
+        MedicalAnalysis.objects.select_related("user")
+        if user.is_staff
+        else MedicalAnalysis.objects.select_related("user").filter(user=user)
+    )
+    training_queryset = TreatmentTrainingRecord.objects.select_related("analysis", "treatment")
+    approved_training_queryset = training_queryset.filter(is_approved=True)
+    current_user_logins = list(
+        user.login_activities.filter(is_active=True).only(
+            "location_label",
+            "device_name",
+            "browser_name",
+            "last_seen",
+        )
+    )
+    latest_analyses = list(analysis_queryset.order_by("-created_at")[:5])
+    latest_analysis = latest_analyses[0] if latest_analyses else None
+    previous_analysis = latest_analyses[1] if len(latest_analyses) > 1 else None
+    approved_training_latest = approved_training_queryset.first()
+    model_evaluation_summary = load_evaluation_report()
+    analysis_comparison = compare_analyses(latest_analysis, previous_analysis)
+    profile = getattr(user, "profile", None)
+    risk_donut = _build_risk_donut(analysis_queryset)
+    condition_mix_donut = _build_condition_mix(analysis_queryset)
+    model_mix_donut = _build_model_mix(analysis_queryset)
+    approved_training_count = approved_training_queryset.count()
+
+    if user.is_staff:
+        dashboard_stats = [
+            {
+                "label": "Registered users",
+                "value": user_model.objects.count(),
+                "helper": "Total members stored in the platform.",
+            },
+            {
+                "label": "Active devices",
+                "value": LoginActivity.objects.filter(is_active=True).count(),
+                "helper": "Current authenticated sessions across the platform.",
+            },
+            {
+                "label": "Clinical analyses",
+                "value": MedicalAnalysis.objects.count(),
+                "helper": "Saved image, symptom, and report analysis records.",
+            },
+            {
+                "label": "Training-ready records",
+                "value": approved_training_count,
+                "helper": "Doctor-reviewed cases available for model improvement.",
+            },
+        ]
+    else:
+        dashboard_stats = [
+            {
+                "label": "Tracked cases",
+                "value": analysis_queryset.count(),
+                "helper": "Your saved clinical records and report reviews.",
+            },
+            {
+                "label": "Compared reports",
+                "value": analysis_queryset.filter(previous_disease_percentage__isnull=False).count(),
+                "helper": "Cases with old-vs-new report comparison already calculated.",
+            },
+            {
+                "label": "High-risk alerts",
+                "value": analysis_queryset.filter(risk_level="High").count(),
+                "helper": "Records that may need faster clinical attention.",
+            },
+            {
+                "label": "Active devices",
+                "value": len(current_user_logins),
+                "helper": "Current signed-in sessions attached to your profile.",
+            },
+        ]
+
+    context = {
+        "dashboard_stats": dashboard_stats,
+        "quick_actions": [
+            {
+                "title": "Analyze Patient",
+                "description": "Run symptom, image, and voice intake from the main clinical workspace.",
+                "url": reverse("index"),
+                "action_label": "Open Intake",
+            },
+            {
+                "title": "Reports & Comparison",
+                "description": "Review the current report and compare it with previous findings from a focused page.",
+                "url": reverse("report_intake"),
+                "action_label": "Open Reports",
+            },
+            {
+                "title": "Clinical Chat",
+                "description": "Continue follow-up questions with local QA and AI-assisted guidance.",
+                "url": reverse("chat"),
+                "action_label": "Open Chat",
+            },
+        ],
+        "current_user_summary": {
+            "display_name": user.get_full_name().strip() or user.username,
+            "user_id": user.email or user.username,
+            "mobile_number": get_mobile_number(user),
+            "role": "Admin" if user.is_staff else "Member",
+            "device_count": len(current_user_logins),
+            "locations": get_user_locations(user),
+            "response_style": profile.response_style if profile else "balanced",
+            "language_preference": profile.language_preference if profile else "english",
+        },
+        "current_user_logins": current_user_logins,
+        "login_chart_data": _build_login_chart_data(),
+        "analysis_chart_data": _build_analysis_trend(analysis_queryset),
+        "risk_distribution": _build_risk_distribution(analysis_queryset),
+        "risk_donut": risk_donut,
+        "condition_mix_donut": condition_mix_donut,
+        "model_mix_donut": model_mix_donut,
+        "analytics_charts": [
+            risk_donut,
+            condition_mix_donut,
+            model_mix_donut,
+        ],
+        "analysis_comparison": analysis_comparison,
+        "latest_analysis": latest_analysis,
+        "recent_analyses": latest_analyses,
+        "history_highlights": _build_history_highlights(analysis_queryset),
+        "public_treatment_summaries": _build_public_treatment_summaries(),
+        "training_dataset_summary": {
+            "record_count": training_queryset.count(),
+            "approved_count": approved_training_count,
+            "average_quality": int(approved_training_queryset.aggregate(avg=Avg("quality_score"))["avg"] or 0),
+            "latest_synced_at": approved_training_latest.updated_at if approved_training_latest else None,
+        },
+        "model_evaluation_summary": model_evaluation_summary,
+        "alerts": _build_alerts(
+            analysis_queryset,
+            current_user_logins,
+            model_evaluation_summary,
+            approved_training_count,
+        ),
+        "user_rows": _build_user_rows() if user.is_staff else [],
+    }
+    cache.set(cache_key, context, DASHBOARD_CACHE_SECONDS)
+    return context
+
+
+def build_history_context(user, session_id=None, search="", risk=""):
+    search = (search or "").strip()
+    risk = (risk or "").strip()
+
+    session_queryset = (
+        ChatSession.objects.filter(user=user)
+        .annotate(message_count=Count("messages"))
+        .order_by("-created_at")
+    )
+    sessions = list(session_queryset[:10])
+    selected_session = None
+    if session_id:
+        selected_session = next((session for session in sessions if str(session.id) == str(session_id)), None)
+    if not selected_session and sessions:
+        selected_session = sessions[0]
+
+    messages = []
+    if selected_session:
+        messages = list(selected_session.messages.order_by("created_at"))
+
+    analysis_queryset = (
+        MedicalAnalysis.objects.filter(user=user)
+        .prefetch_related(
+            Prefetch(
+                "treatments",
+                queryset=TreatmentEntry.objects.select_related("added_by").order_by("-created_at"),
+                to_attr="prefetched_treatments",
+            )
+        )
+        .order_by("-created_at")
+    )
+
+    if search:
+        analysis_queryset = analysis_queryset.filter(
+            Q(title__icontains=search)
+            | Q(symptoms_text__icontains=search)
+            | Q(report_text__icontains=search)
+            | Q(predicted_condition__icontains=search)
+            | Q(ai_summary__icontains=search)
+        )
+
+    if risk in {"High", "Medium", "Low"}:
+        analysis_queryset = analysis_queryset.filter(risk_level=risk)
+
+    timeline_analyses = list(analysis_queryset[:16])
+    timeline_records = []
+    for analysis in timeline_analyses:
+        latest_treatment = analysis.prefetched_treatments[0] if analysis.prefetched_treatments else None
+        timeline_records.append(
+            {
+                "analysis": analysis,
+                "risk_css": (analysis.risk_level or "unknown").lower(),
+                "doctor_summary": (
+                    _build_treatment_summary_text(latest_treatment.treatment_notes, limit=140)
+                    if latest_treatment
+                    else "No doctor note has been attached to this case yet."
+                ),
+                "doctor_label": (
+                    f"{latest_treatment.doctor_name} • {latest_treatment.specialization}"
+                    if latest_treatment
+                    else "AI-generated clinical record"
+                ),
+                "view_url": reverse("analysis_detail", args=[analysis.id]),
+                "compare_url": reverse("analysis_detail", args=[analysis.id]),
+            }
+        )
+
+    base_history_queryset = MedicalAnalysis.objects.filter(user=user)
+    return {
+        "sessions": sessions,
+        "selected_session": selected_session,
+        "messages": messages,
+        "history_search": search,
+        "history_risk": risk,
+        "history_stats": [
+            {
+                "label": "Timeline cases",
+                "value": base_history_queryset.count(),
+                "helper": "Saved clinical records across your health journey.",
+            },
+            {
+                "label": "Compared reports",
+                "value": base_history_queryset.filter(previous_disease_percentage__isnull=False).count(),
+                "helper": "Records that already include old-vs-new comparison data.",
+            },
+            {
+                "label": "High-risk cases",
+                "value": base_history_queryset.filter(risk_level="High").count(),
+                "helper": "Cases currently tagged for closer follow-up.",
+            },
+            {
+                "label": "Chat sessions",
+                "value": session_queryset.count(),
+                "helper": "Saved assistant conversations available for review.",
+            },
+        ],
+        "timeline_records": timeline_records,
+    }

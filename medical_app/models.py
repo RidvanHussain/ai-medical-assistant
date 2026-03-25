@@ -7,12 +7,35 @@ from django.utils import timezone
 
 
 class UserProfile(models.Model):
+    GENDER_CHOICES = [
+        ("", "Prefer not to say"),
+        ("female", "Female"),
+        ("male", "Male"),
+        ("non_binary", "Non-binary"),
+        ("other", "Other"),
+    ]
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         related_name="profile",
         on_delete=models.CASCADE,
     )
     mobile_number = models.CharField(max_length=20)
+    date_of_birth = models.DateField(blank=True, null=True)
+    gender = models.CharField(max_length=20, blank=True, choices=GENDER_CHOICES)
+    blood_group = models.CharField(max_length=10, blank=True)
+    allergies = models.TextField(blank=True)
+    chronic_conditions = models.TextField(blank=True)
+    current_medications = models.TextField(blank=True)
+    emergency_contact = models.CharField(max_length=120, blank=True)
+    language_preference = models.CharField(max_length=20, default="english")
+    response_style = models.CharField(max_length=20, default="balanced")
+    ai_risk_preference = models.CharField(max_length=20, default="balanced")
+    notification_preference = models.CharField(max_length=20, default="important_only")
+    privacy_mode = models.CharField(max_length=20, default="standard")
+    performance_mode = models.CharField(max_length=20, default="balanced")
+    voice_summary_enabled = models.BooleanField(default=True)
+    auto_compare_reports = models.BooleanField(default=True)
     last_known_location = models.CharField(max_length=255, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -43,6 +66,9 @@ class LoginActivity(models.Model):
     class Meta:
         unique_together = ("user", "session_key")
         ordering = ("-last_seen",)
+        indexes = [
+            models.Index(fields=["user", "is_active", "-last_seen"], name="login_user_active_seen_idx"),
+        ]
 
     def __str__(self):
         return f"{self.user.username} on {self.device_name or 'Unknown device'}"
@@ -141,6 +167,9 @@ class MedicalAnalysis(models.Model):
 
     class Meta:
         ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="analysis_user_created_idx"),
+        ]
 
     def __str__(self):
         return self.title or f"Medical Analysis {self.id}"
@@ -200,6 +229,12 @@ class TreatmentTrainingRecord(models.Model):
 
     class Meta:
         ordering = ("-updated_at",)
+        indexes = [
+            models.Index(
+                fields=["source_type", "is_approved", "-updated_at"],
+                name="training_source_approved_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"Training record for treatment {self.treatment_id}"
@@ -224,6 +259,11 @@ class ChatMessage(models.Model):
     text = models.TextField(blank=True)
     attachment = models.FileField(upload_to="chat_files/", blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["session", "created_at"], name="chat_session_created_idx"),
+        ]
 
     def __str__(self):
         return f"{self.role} @ {self.created_at}"

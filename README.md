@@ -28,6 +28,7 @@ cd ai_medical_project
 pip install -r requirements.txt
 copy .env.example .env
 python manage.py migrate
+python manage.py bootstrap_defaults
 python manage.py runserver
 ```
 
@@ -73,12 +74,23 @@ Each doctor treatment entry is automatically transformed into a structured train
 Useful commands:
 
 ```bash
+python manage.py bootstrap_defaults
+python manage.py import_external_datasets --datasets-dir %USERPROFILE%\Downloads --replace --dedupe
 python manage.py sync_training_records
 python manage.py export_training_dataset --format jsonl
 python manage.py train_condition_model
+python manage.py train_qa_ranker --datasets-dir %USERPROFILE%\Downloads --dedupe
 ```
 
+Runtime optimization notes:
+
+- Default records now seed through `post_migrate` and the `bootstrap_defaults` command instead of repeated per-request setup
+- Read-mostly dashboard and homepage data use Django `LocMemCache`
+- Static assets use `whitenoise` compression and cache headers
+
 `train_condition_model` evaluates the approved dataset with an 80% training split and 20% testing split, writes metrics to `medical_app/ml_models/report_classifier_metrics.json`, and then refreshes the production classifier from the approved dataset.
+
+`train_qa_ranker` builds the local TF-IDF question-answer retrieval artifacts used by chat before Groq fallback is attempted for low-confidence text queries.
 
 This keeps future model training aligned with doctor-reviewed cases instead of relying on unverified website scraping or raw LLM output.
 
@@ -92,12 +104,27 @@ Important settings:
 - `DJANGO_DEBUG`
 - `DJANGO_ALLOWED_HOSTS`
 - `GROQ_API_KEY`
+- `GOOGLE_OAUTH_CLIENT_ID`
+- `GOOGLE_OAUTH_CLIENT_SECRET`
 - `DJANGO_EMAIL_BACKEND`
 - `DJANGO_SMS_BACKEND`
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_FROM_NUMBER`
 - `DJANGO_DEFAULT_PHONE_COUNTRY_CODE`
+
+### Gmail Login
+
+The login page supports Google OAuth so users can continue with Gmail just like on other websites.
+
+To enable it:
+
+1. Create a Google OAuth Web application in Google Cloud Console.
+2. Add your local callback URL, for example `http://127.0.0.1:8000/accounts/google/login/callback/`.
+3. Set `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` in `.env`.
+4. Restart the server.
+
+When configured, clicking `Login with Gmail` opens the Google account chooser. If the browser already has a signed-in Google account, the user can continue directly from that chooser. If not, Google asks for the Gmail sign-in on Google's own secure page.
 
 ## OTP Delivery Notes
 

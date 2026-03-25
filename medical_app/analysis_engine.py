@@ -1,11 +1,16 @@
+import logging
 from pathlib import Path
 import pickle
 import re
 
 
+logger = logging.getLogger(__name__)
+
 MODEL_DIR = Path(__file__).resolve().parent / "ml_models"
 REPORT_MODEL_PATH = MODEL_DIR / "report_classifier.pkl"
 IMAGE_MODEL_PATH = MODEL_DIR / "image_classifier.pkl"
+GENERAL_REVIEW_REQUIRED = "General review required"
+_PICKLE_MODEL_CACHE = {}
 
 
 CONDITION_KEYWORDS = {
@@ -14,6 +19,25 @@ CONDITION_KEYWORDS = {
     "Respiratory": ["cough", "wheeze", "asthma", "shortness of breath", "bronch", "lung"],
     "Orthopedic": ["fracture", "sprain", "swelling", "joint", "injury", "pain"],
     "Cardiovascular": ["chest pain", "hypertension", "palpitations", "pressure", "cardiac"],
+}
+
+CONDITION_ALIASES = {
+    "general review required": GENERAL_REVIEW_REQUIRED,
+    "bronchitis": "Respiratory",
+    "pneumonia": "Respiratory",
+    "copd": "Respiratory",
+    "flu": "Infection",
+    "viral infection": "Infection",
+    "bacterial infection": "Infection",
+    "cellulitis": "Infection",
+    "dermatitis": "Dermatology",
+    "eczema": "Dermatology",
+    "psoriasis": "Dermatology",
+    "fracture": "Orthopedic",
+    "sprain": "Orthopedic",
+    "arthritis": "Orthopedic",
+    "hypertension": "Cardiovascular",
+    "heart disease": "Cardiovascular",
 }
 
 HIGH_RISK_TERMS = {
@@ -59,11 +83,31 @@ PERCENTAGE_CONTEXT_TERMS = {
 
 
 def _load_pickle_model(model_path):
+    cache_key = str(model_path)
     if not model_path.exists():
+        _PICKLE_MODEL_CACHE.pop(cache_key, None)
         return None
 
-    with model_path.open("rb") as model_file:
-        return pickle.load(model_file)
+    file_signature = (model_path.stat().st_mtime_ns, model_path.stat().st_size)
+    cached_entry = _PICKLE_MODEL_CACHE.get(cache_key)
+    if cached_entry and cached_entry["signature"] == file_signature:
+        return cached_entry["model"]
+
+    try:
+        with model_path.open("rb") as model_file:
+            model = pickle.load(model_file)
+            _PICKLE_MODEL_CACHE[cache_key] = {
+                "signature": file_signature,
+                "model": model,
+            }
+            return model
+    except Exception as error:
+        logger.warning("Could not load trained model from %s: %s", model_path, error)
+        _PICKLE_MODEL_CACHE[cache_key] = {
+            "signature": file_signature,
+            "model": None,
+        }
+        return None
 
 
 def _extract_condition_matches(text):
@@ -176,25 +220,37 @@ def compare_disease_levels(current_percentage, previous_percentage):
     }
 
 
-def analyze_report_text(report_text):
+def _normalize_condition_label(label):
+    cleaned_label = str(label or "").strip()
+    if not cleaned_label:
+        return GENERAL_REVIEW_REQUIRED
+
+    canonical_labels = {condition.lower(): condition for condition in CONDITION_KEYWORDS}
+    lowered_label = cleaned_label.lower()
+
+    if lowered_label in canonical_labels:
+        return canonical_labels[lowered_label]
+
+    return CONDITION_ALIASES.get(lowered_label, cleaned_label)
+
+
+def _extract_model_confidence(model, report_text):
+    if not hasattr(model, "predict_proba"):
+        return None
+
+    try:
+        probabilities = model.predict_proba([report_text])[0]
+    except Exception as error:
+        logger.warning("Could not read trained report model confidence: %s", error)
+        return None
+
+    return float(max(probabilities)) if len(probabilities) else None
+
+
+def _build_heuristic_report_result(report_text, disease_percentage):
     report_text = (report_text or "").strip()
-    model = _load_pickle_model(REPORT_MODEL_PATH)
-    disease_percentage = extract_disease_percentage(report_text)
-
-    if model and hasattr(model, "predict"):
-        predicted = model.predict([report_text])[0]
-        confidence = 0.87
-        return {
-            "predicted_condition": str(predicted),
-            "detected_conditions_count": 1,
-            "risk_level": "Medium",
-            "confidence_score": confidence,
-            "model_source": "trained-model",
-            "disease_percentage": disease_percentage,
-        }
-
     matches = _extract_condition_matches(report_text)
-    predicted_condition = max(matches, key=matches.get) if matches else "General review required"
+    predicted_condition = max(matches, key=matches.get) if matches else GENERAL_REVIEW_REQUIRED
     condition_count = max(1, len(matches)) if report_text else 0
 
     lowered = report_text.lower()
@@ -214,6 +270,53 @@ def analyze_report_text(report_text):
         "risk_level": risk_level,
         "confidence_score": confidence,
         "model_source": "heuristic",
+        "disease_percentage": disease_percentage,
+    }
+
+
+def analyze_report_text(report_text):
+    report_text = (report_text or "").strip()
+    disease_percentage = extract_disease_percentage(report_text)
+    heuristic_result = _build_heuristic_report_result(report_text, disease_percentage)
+
+    if not report_text:
+        return heuristic_result
+
+    model = _load_pickle_model(REPORT_MODEL_PATH)
+    if not model or not hasattr(model, "predict"):
+        return heuristic_result
+
+    try:
+        raw_prediction = model.predict([report_text])[0]
+    except Exception as error:
+        logger.warning("Could not run trained report model prediction: %s", error)
+        return heuristic_result
+
+    predicted_condition = _normalize_condition_label(raw_prediction)
+    heuristic_condition = heuristic_result["predicted_condition"]
+    model_confidence = _extract_model_confidence(model, report_text)
+
+    if (
+        heuristic_condition != GENERAL_REVIEW_REQUIRED
+        and predicted_condition != heuristic_condition
+    ):
+        return heuristic_result
+    if (
+        heuristic_condition != GENERAL_REVIEW_REQUIRED
+        and model_confidence is not None
+        and model_confidence < 0.45
+    ):
+        return heuristic_result
+
+    return {
+        "predicted_condition": predicted_condition,
+        "detected_conditions_count": max(1, heuristic_result["detected_conditions_count"]),
+        "risk_level": heuristic_result["risk_level"],
+        "confidence_score": max(
+            heuristic_result["confidence_score"],
+            round(model_confidence, 4) if model_confidence is not None else 0.87,
+        ),
+        "model_source": "trained-model",
         "disease_percentage": disease_percentage,
     }
 
