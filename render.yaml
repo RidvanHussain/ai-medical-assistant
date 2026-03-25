@@ -3,7 +3,7 @@ services:
     name: ai-medical-assistant
     env: python
     plan: starter
-    buildCommand: ./build.sh
+    buildCommand: bash build.sh
     startCommand: python manage.py migrate --noinput && python manage.py configure_site && python manage.py bootstrap_defaults && gunicorn ai_medical_project.wsgi:application --bind 0.0.0.0:$PORT --workers ${GUNICORN_WORKERS:-1} --timeout ${GUNICORN_TIMEOUT:-180}
     disk:
       name: ai-medical-data
