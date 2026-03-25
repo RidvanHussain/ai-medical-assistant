@@ -8,11 +8,17 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(getattr(settings, "MODEL_ARTIFACT_ROOT", Path(__file__).resolve().parent / "ml_models"))
-MODEL_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_MODEL_PATH = MODEL_DIR / "report_classifier.pkl"
 IMAGE_MODEL_PATH = MODEL_DIR / "image_classifier.pkl"
 GENERAL_REVIEW_REQUIRED = "General review required"
 _PICKLE_MODEL_CACHE = {}
+
+
+def ensure_model_dir_exists():
+    try:
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        logger.warning("Could not create model artifact directory %s: %s", MODEL_DIR, error)
 
 
 CONDITION_KEYWORDS = {
