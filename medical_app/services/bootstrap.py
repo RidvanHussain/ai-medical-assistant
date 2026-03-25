@@ -74,6 +74,7 @@ def ensure_default_admin():
         defaults={
             "mobile_number": "9999999999",
             "last_known_location": "Demo environment",
+            "training_console_enabled": bool(admin_user.is_superuser),
         },
     )
 
@@ -83,6 +84,9 @@ def ensure_default_admin():
         profile_changed = True
     if profile.last_known_location != "Demo environment":
         profile.last_known_location = "Demo environment"
+        profile_changed = True
+    if admin_user.is_superuser and not profile.training_console_enabled:
+        profile.training_console_enabled = True
         profile_changed = True
     if profile_changed:
         profile.save()

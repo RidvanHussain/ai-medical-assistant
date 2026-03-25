@@ -46,6 +46,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "medical_app.middleware.SiteLanguageMiddleware",
     "medical_app.middleware.CurrentLoginActivityMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
@@ -63,6 +64,7 @@ TEMPLATES = [
                 "django.template.context_processors.request",
                 "django.contrib.auth.context_processors.auth",
                 "django.contrib.messages.context_processors.messages",
+                "medical_app.context_processors.site_language_context",
             ],
         },
     },
@@ -105,6 +107,13 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
 LANGUAGE_CODE = "en-us"
+LANGUAGES = [
+    ("en", "English"),
+    ("hi", "Hindi"),
+    ("ur", "Urdu"),
+    ("ar", "Arabic"),
+    ("bn", "Bengali"),
+]
 TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "UTC")
 
 USE_I18N = True

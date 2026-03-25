@@ -3,10 +3,27 @@ from . import views
 
 urlpatterns = [
     path("health/", views.healthcheck_view, name="healthcheck"),
+    path("set-site-language/", views.set_site_language_view, name="set_site_language"),
     path("", views.index, name="index"),
     path("reports/", views.report_intake_view, name="report_intake"),
     path("google-login/", views.google_login_start, name="google_login_start"),
     path("dashboard/", views.dashboard_view, name="dashboard"),
+    path("dashboard/training-control/", views.training_control_view, name="training_control"),
+    path(
+        "dashboard/training-control/train-now/",
+        views.training_control_train_now_view,
+        name="training_control_train_now",
+    ),
+    path(
+        "dashboard/training-control/upload/",
+        views.training_control_upload_view,
+        name="training_control_upload",
+    ),
+    path(
+        "dashboard/training-control/sample-zip/",
+        views.training_control_sample_zip_view,
+        name="training_control_sample_zip",
+    ),
     path("analyses/<int:analysis_id>/", views.analysis_detail_view, name="analysis_detail"),
     path(
         "analyses/<int:analysis_id>/treatments/<int:treatment_id>/edit/",

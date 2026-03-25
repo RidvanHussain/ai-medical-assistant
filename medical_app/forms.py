@@ -8,6 +8,7 @@ from django.db.models import Q
 from django.utils.text import slugify
 
 from .models import PendingRegistration, TreatmentEntry, UserProfile
+from .services.site_language import get_language_choices
 
 user_model = get_user_model()
 
@@ -43,13 +44,7 @@ LONG_TEXTAREA_ATTRS = {
     "class": "auto-expand",
 }
 
-LANGUAGE_CHOICES = [
-    ("english", "English"),
-    ("hindi", "Hindi"),
-    ("urdu", "Urdu"),
-    ("arabic", "Arabic"),
-    ("bengali", "Bengali"),
-]
+LANGUAGE_CHOICES = get_language_choices()
 
 RESPONSE_STYLE_CHOICES = [
     ("balanced", "Balanced"),
@@ -457,8 +452,10 @@ class ProfileSettingsForm(forms.ModelForm):
                     "performance_mode",
                     "voice_summary_enabled",
                     "auto_compare_reports",
+                    "training_console_enabled",
                 ):
-                    self.fields[field_name].initial = getattr(existing_profile, field_name)
+                    if field_name in self.fields:
+                        self.fields[field_name].initial = getattr(existing_profile, field_name)
             else:
                 self.fields["mobile_number"].initial = ""
 
@@ -484,26 +481,32 @@ class ProfileSettingsForm(forms.ModelForm):
 
         if commit:
             user.save()
+            profile_defaults = {
+                "mobile_number": self.cleaned_data["mobile_number"].strip(),
+                "date_of_birth": self.cleaned_data.get("date_of_birth"),
+                "gender": self.cleaned_data.get("gender", ""),
+                "blood_group": (self.cleaned_data.get("blood_group") or "").strip(),
+                "allergies": (self.cleaned_data.get("allergies") or "").strip(),
+                "chronic_conditions": (self.cleaned_data.get("chronic_conditions") or "").strip(),
+                "current_medications": (self.cleaned_data.get("current_medications") or "").strip(),
+                "emergency_contact": (self.cleaned_data.get("emergency_contact") or "").strip(),
+                "language_preference": self.cleaned_data.get("language_preference") or "english",
+                "response_style": self.cleaned_data.get("response_style") or "balanced",
+                "ai_risk_preference": self.cleaned_data.get("ai_risk_preference") or "balanced",
+                "notification_preference": self.cleaned_data.get("notification_preference") or "important_only",
+                "privacy_mode": self.cleaned_data.get("privacy_mode") or "standard",
+                "performance_mode": self.cleaned_data.get("performance_mode") or "balanced",
+                "voice_summary_enabled": bool(self.cleaned_data.get("voice_summary_enabled")),
+                "auto_compare_reports": bool(self.cleaned_data.get("auto_compare_reports")),
+            }
+            if "training_console_enabled" in self.fields:
+                profile_defaults["training_console_enabled"] = bool(
+                    self.cleaned_data.get("training_console_enabled")
+                )
+
             UserProfile.objects.update_or_create(
                 user=user,
-                defaults={
-                    "mobile_number": self.cleaned_data["mobile_number"].strip(),
-                    "date_of_birth": self.cleaned_data.get("date_of_birth"),
-                    "gender": self.cleaned_data.get("gender", ""),
-                    "blood_group": (self.cleaned_data.get("blood_group") or "").strip(),
-                    "allergies": (self.cleaned_data.get("allergies") or "").strip(),
-                    "chronic_conditions": (self.cleaned_data.get("chronic_conditions") or "").strip(),
-                    "current_medications": (self.cleaned_data.get("current_medications") or "").strip(),
-                    "emergency_contact": (self.cleaned_data.get("emergency_contact") or "").strip(),
-                    "language_preference": self.cleaned_data.get("language_preference") or "english",
-                    "response_style": self.cleaned_data.get("response_style") or "balanced",
-                    "ai_risk_preference": self.cleaned_data.get("ai_risk_preference") or "balanced",
-                    "notification_preference": self.cleaned_data.get("notification_preference") or "important_only",
-                    "privacy_mode": self.cleaned_data.get("privacy_mode") or "standard",
-                    "performance_mode": self.cleaned_data.get("performance_mode") or "balanced",
-                    "voice_summary_enabled": bool(self.cleaned_data.get("voice_summary_enabled")),
-                    "auto_compare_reports": bool(self.cleaned_data.get("auto_compare_reports")),
-                },
+                defaults=profile_defaults,
             )
 
         return user
@@ -513,6 +516,7 @@ class AdminUserManagementForm(ProfileSettingsForm):
     username = forms.CharField(label="User ID", disabled=True, required=False)
     is_staff = forms.BooleanField(label="Administrator role", required=False)
     is_active = forms.BooleanField(label="Active account", required=False)
+    training_console_enabled = forms.BooleanField(label="Developer training access", required=False)
 
     class Meta(ProfileSettingsForm.Meta):
         fields = ["first_name", "last_name", "email", "is_staff", "is_active"]

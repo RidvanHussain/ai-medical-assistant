@@ -1,4 +1,118 @@
 const THEME_STORAGE_KEY = "ai-medical-theme";
+let SITE_TRANSLATIONS = {};
+
+function normalizeTranslationKey(value) {
+    return String(value || "")
+        .replace(/\s+/g, " ")
+        .replace(/\u00a0/g, " ")
+        .trim();
+}
+
+function loadSiteTranslationCatalog() {
+    const catalogElement = document.getElementById("site-translation-catalog");
+    if (!catalogElement) {
+        SITE_TRANSLATIONS = {};
+        return;
+    }
+
+    try {
+        SITE_TRANSLATIONS = JSON.parse(catalogElement.textContent || "{}");
+    } catch (error) {
+        SITE_TRANSLATIONS = {};
+    }
+}
+
+function translateUiText(value) {
+    const normalized = normalizeTranslationKey(value);
+    if (!normalized || !Object.keys(SITE_TRANSLATIONS).length) {
+        return value;
+    }
+
+    return SITE_TRANSLATIONS[normalized] || value;
+}
+
+function translateTextNode(node) {
+    if (!node || !node.nodeValue) {
+        return;
+    }
+
+    const originalValue = node.nodeValue;
+    const leadingWhitespace = originalValue.match(/^\s*/)?.[0] || "";
+    const trailingWhitespace = originalValue.match(/\s*$/)?.[0] || "";
+    const translated = translateUiText(originalValue);
+
+    if (translated !== originalValue) {
+        node.nodeValue = `${leadingWhitespace}${translated}${trailingWhitespace}`;
+    }
+}
+
+function translateDomContent(root = document.body) {
+    if (!root || !Object.keys(SITE_TRANSLATIONS).length) {
+        return;
+    }
+
+    const blockedParents = new Set(["SCRIPT", "STYLE", "TEXTAREA", "CODE", "PRE"]);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+
+    while (walker.nextNode()) {
+        const currentNode = walker.currentNode;
+        const parentElement = currentNode.parentElement;
+
+        if (!parentElement || blockedParents.has(parentElement.tagName)) {
+            continue;
+        }
+
+        textNodes.push(currentNode);
+    }
+
+    textNodes.forEach(translateTextNode);
+
+    root.querySelectorAll("[placeholder], [title], [aria-label], img[alt], input[type='submit'], input[type='button']").forEach((element) => {
+        ["placeholder", "title", "aria-label", "alt", "value"].forEach((attributeName) => {
+            if (!element.hasAttribute(attributeName)) {
+                return;
+            }
+
+            const originalValue = element.getAttribute(attributeName);
+            const translatedValue = translateUiText(originalValue);
+            if (translatedValue !== originalValue) {
+                element.setAttribute(attributeName, translatedValue);
+            }
+        });
+    });
+
+    root.querySelectorAll("option").forEach((option) => {
+        const translatedLabel = translateUiText(option.textContent);
+        if (translatedLabel !== option.textContent) {
+            option.textContent = translatedLabel;
+        }
+    });
+
+    const translatedTitle = translateUiText(document.title);
+    if (translatedTitle !== document.title) {
+        document.title = translatedTitle;
+    }
+}
+
+function wireLanguageSwitcher() {
+    const languageSelect = document.getElementById("language-select");
+    if (!languageSelect) {
+        return;
+    }
+
+    languageSelect.addEventListener("change", function () {
+        const endpoint = languageSelect.dataset.languageEndpoint;
+        if (!endpoint) {
+            return;
+        }
+
+        const currentPath = window.location.pathname + window.location.search;
+        const separator = endpoint.includes("?") ? "&" : "?";
+        const targetUrl = `${endpoint}${separator}language=${encodeURIComponent(languageSelect.value)}&next=${encodeURIComponent(currentPath)}`;
+        window.location.assign(targetUrl);
+    });
+}
 
 function getPasswordToggleIcon(isVisible) {
     if (isVisible) {
@@ -166,13 +280,13 @@ function validateEmailField(input, force = false) {
 
     if (!value) {
         return touched
-            ? setLiveFieldState(input, false, "Email ID is required.")
+            ? setLiveFieldState(input, false, translateUiText("Email ID is required."))
             : setLiveFieldState(input, true, "");
     }
 
     const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
     if (!emailPattern.test(value)) {
-        return setLiveFieldState(input, false, "Enter a valid email ID.");
+        return setLiveFieldState(input, false, translateUiText("Enter a valid email ID."));
     }
 
     return setLiveFieldState(input, true, "");
@@ -186,19 +300,19 @@ function validateMobileField(input, force = false) {
 
     if (!value) {
         return touched
-            ? setLiveFieldState(input, false, "Mobile number is required.")
+            ? setLiveFieldState(input, false, translateUiText("Mobile number is required."))
             : setLiveFieldState(input, true, "");
     }
 
     if (!/^\d+$/.test(value)) {
-        return setLiveFieldState(input, false, "Use digits only in the mobile number.");
+        return setLiveFieldState(input, false, translateUiText("Use digits only in the mobile number."));
     }
 
     if (value.length < minDigits || value.length > maxDigits) {
         return setLiveFieldState(
             input,
             false,
-            `Enter a valid mobile number with ${minDigits} to ${maxDigits} digits.`,
+            translateUiText(`Enter a valid mobile number with ${minDigits} to ${maxDigits} digits.`),
         );
     }
 
@@ -275,17 +389,14 @@ function wireLiveValidation() {
 }
 
 document.addEventListener("DOMContentLoaded", function () {
+    loadSiteTranslationCatalog();
     const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY) || "light";
     applyTheme(storedTheme);
     wireAutoExpand();
     wirePasswordToggles();
     wireLiveValidation();
-
-    const languageSelect = document.getElementById("language-select");
-    if (languageSelect && !document.getElementById("mainForm")) {
-        languageSelect.disabled = true;
-        languageSelect.title = "Response language is available on the clinical intake page.";
-    }
+    wireLanguageSwitcher();
+    translateDomContent();
 
     const settingsPanel = document.getElementById("settings");
     if (settingsPanel) {

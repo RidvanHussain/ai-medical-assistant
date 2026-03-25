@@ -49,6 +49,86 @@
         </div>
     </section>
 
+    {% if training_status_widget %}
+        <section class="card section-card">
+            <div class="card-header">
+                <div>
+                    <h2>Live Training Status</h2>
+                    <p class="card-sub">Developer-only AI training controls, upload readiness, active version, and latest refresh state.</p>
+                </div>
+            </div>
+
+            <div class="profile-summary">
+                <div class="profile-summary-item">
+                    <span class="summary-label">Training State</span>
+                    <strong>{{ training_status_widget.status_label }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Pending Queue</span>
+                    <strong>{{ training_status_widget.pending_records }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Knowledge Entries</span>
+                    <strong>{{ training_status_widget.approved_knowledge_count }}/{{ training_status_widget.knowledge_count }} approved</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Latest Upload</span>
+                    <strong>{{ training_status_widget.latest_upload_status }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Upload Batch</span>
+                    <strong>{{ training_status_widget.latest_upload_title }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Active Version</span>
+                    <strong>{{ training_status_widget.active_version_label }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Latest Training Run</span>
+                    <strong>{{ training_status_widget.latest_training_run_status }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Queued Jobs</span>
+                    <strong>{{ training_status_widget.queued_run_count }}</strong>
+                </div>
+                <div class="profile-summary-item">
+                    <span class="summary-label">Last Trained</span>
+                    <strong>
+                        {% if training_status_widget.last_trained_at %}
+                            {{ training_status_widget.last_trained_at|date:"M d, Y H:i" }}
+                        {% else %}
+                            Not trained yet
+                        {% endif %}
+                    </strong>
+                </div>
+            </div>
+
+            <div class="info-banner">
+                Background processing is enabled for heavy model refresh. Keep a worker running with
+                <code>{{ training_status_widget.worker_command }}</code>
+                so queued jobs are consumed automatically.
+            </div>
+
+            <div class="action-links">
+                <form class="inline-action-form" method="post" action="{{ training_status_widget.train_now_url }}">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{% url 'dashboard' %}">
+                    <button type="submit">Train Now</button>
+                </form>
+                <a href="{{ training_status_widget.training_center_url }}">Open Training Center</a>
+                <a href="{{ training_status_widget.admin_upload_url }}">Open Upload Manager</a>
+                <a href="{{ training_status_widget.admin_knowledge_url }}">Open Knowledge Entries</a>
+                <a href="{{ training_status_widget.admin_config_url }}">Open AI Configuration</a>
+                <a href="{{ training_status_widget.admin_training_runs_url }}">Open Training History</a>
+                <a href="{{ training_status_widget.sample_zip_url }}">Download Sample ZIP</a>
+                <a href="{{ training_status_widget.template_download_url }}">Download Import Template</a>
+                {% if training_status_widget.latest_upload_error_report_url %}
+                    <a href="{{ training_status_widget.latest_upload_error_report_url }}">Latest Error CSV</a>
+                {% endif %}
+            </div>
+        </section>
+    {% endif %}
+
     <div class="dashboard-grid dashboard-grid-focus">
         <section class="card section-card">
             <div class="card-header">

@@ -48,7 +48,7 @@ def record_audio(file_path, timeout=20, phrase_time_limit=None):
 # Step 2: Convert speech to text using Groq
 # ------------------------------------------------
 
-def transcribe_with_groq(stt_model, audio_filepath, GROQ_API_KEY):
+def transcribe_with_groq(stt_model, audio_filepath, GROQ_API_KEY, language="en"):
 
     client = Groq(api_key=GROQ_API_KEY)
 
@@ -57,7 +57,7 @@ def transcribe_with_groq(stt_model, audio_filepath, GROQ_API_KEY):
         transcription = client.audio.transcriptions.create(
             model=stt_model,
             file=audio_file,
-            language="en"
+            language=language or "en",
         )
 
     return transcription.text

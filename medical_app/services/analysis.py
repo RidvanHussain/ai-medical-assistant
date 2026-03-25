@@ -12,6 +12,13 @@ from medical_app.analysis_engine import (
     compare_disease_levels,
 )
 from medical_app.models import MedicalAnalysis
+from medical_app.services.ai_configuration import (
+    DEFAULT_MEDICAL_MODEL,
+    build_generation_settings,
+    get_analysis_model_name,
+    get_system_prompt,
+)
+from medical_app.services.site_language import get_request_language, get_speech_language_code
 from medical_app.services.preferences import (
     build_health_context,
     build_prompt_behavior_lines,
@@ -21,10 +28,11 @@ from medical_app.services.preferences import (
 )
 
 
-MEDICAL_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+MEDICAL_MODEL = DEFAULT_MEDICAL_MODEL
 
 
 def build_summary_prompt(patient_text, language, user_profile=None):
+    system_prompt = get_system_prompt()
     prompt_lines = [
         "You are a professional medical assistant.",
         "Give general educational guidance only and encourage urgent care for emergency symptoms.",
@@ -35,6 +43,8 @@ def build_summary_prompt(patient_text, language, user_profile=None):
         "3) Short conclusion with practical next steps.",
         f"Patient details: {patient_text or 'No text symptoms provided.'}",
     ]
+    if system_prompt:
+        prompt_lines.insert(2, system_prompt)
     health_context = build_health_context(user_profile)
     if health_context:
         prompt_lines.append(health_context)
@@ -85,6 +95,16 @@ def _extract_report_text(report_path):
     return ""
 
 
+def _analyze_report_once(cache_store, source_text):
+    normalized_text = str(source_text or "").strip()
+    if normalized_text in cache_store:
+        return cache_store[normalized_text]
+
+    insights = analyze_report_text(normalized_text)
+    cache_store[normalized_text] = insights
+    return insights
+
+
 def process_clinical_intake(
     request,
     *,
@@ -93,7 +113,7 @@ def process_clinical_intake(
     speech_to_text,
     text_to_speech,
     image_encoder,
-    medical_model=MEDICAL_MODEL,
+    medical_model=None,
 ):
     context = build_index_context(featured_images)
     if request.method != "POST":
@@ -106,8 +126,12 @@ def process_clinical_intake(
     submitted_symptoms = (request.POST.get("symptoms") or "").strip()
     submitted_report_notes = (request.POST.get("report_notes") or "").strip()
     submitted_previous_report_notes = (request.POST.get("previous_report_notes") or "").strip()
-    language = (request.POST.get("language") or "english").strip().lower()
     user_profile = get_user_profile(request.user)
+    language = get_request_language(
+        request,
+        user_profile=user_profile,
+        explicit_language=request.POST.get("language"),
+    )
 
     context.update(
         {
@@ -132,6 +156,7 @@ def process_clinical_intake(
         if request.user.is_authenticated and auto_compare_reports
         else None
     )
+    report_analysis_cache = {}
 
     try:
         if audio:
@@ -142,6 +167,7 @@ def process_clinical_intake(
                 stt_model="whisper-large-v3",
                 audio_filepath=str(audio_path),
                 GROQ_API_KEY=os.environ.get("GROQ_API_KEY"),
+                language=get_speech_language_code(language),
             )
 
         if image:
@@ -192,18 +218,24 @@ def process_clinical_intake(
                 user_profile=user_profile,
             ),
             encoded_image=encoded_image,
-            model=medical_model,
+            model=medical_model or get_analysis_model_name(),
             mime_type=mime_type,
+            **build_generation_settings(),
         )
         context["doctor_response"] = doctor_response
         context["report_summary"] = doctor_response
 
         analysis_source_text = "\n\n".join(part for part in [context["speech_text"], report_text] if part)
-        report_insights = analyze_report_text(analysis_source_text)
+        report_insights = _analyze_report_once(report_analysis_cache, analysis_source_text)
         image_insights = analyze_image_record(image_relative_path)
-        current_report_insights = analyze_report_text(report_text or analysis_source_text)
+        current_report_source = report_text or analysis_source_text
+        current_report_insights = (
+            report_insights
+            if current_report_source == analysis_source_text
+            else _analyze_report_once(report_analysis_cache, current_report_source)
+        )
         previous_report_insights = (
-            analyze_report_text(previous_report_text)
+            _analyze_report_once(report_analysis_cache, previous_report_text)
             if previous_report_text
             else {"disease_percentage": None}
         )

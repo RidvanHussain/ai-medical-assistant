@@ -1,5 +1,6 @@
 import pickle
 from collections import Counter
+from itertools import chain
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -21,7 +22,7 @@ from medical_app.model_evaluation import (
     save_evaluation_report,
     split_training_samples,
 )
-from medical_app.models import TreatmentTrainingRecord
+from medical_app.models import ClinicalKnowledgeEntry, TreatmentTrainingRecord
 
 
 class Command(BaseCommand):
@@ -69,7 +70,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--source-types",
-            default="doctor_reviewed_case,external_dataset",
+            default="doctor_reviewed_case,external_dataset,admin_manual,admin_bulk_upload",
             help="Comma-separated source_type values to include in training.",
         )
 
@@ -86,11 +87,15 @@ class Command(BaseCommand):
         if not source_types:
             raise CommandError("At least one source type must be provided.")
 
-        queryset = TreatmentTrainingRecord.objects.filter(
+        treatment_queryset = TreatmentTrainingRecord.objects.filter(
             is_approved=True,
             source_type__in=source_types,
         ).order_by("id")
-        raw_samples = build_training_samples(queryset)
+        knowledge_queryset = ClinicalKnowledgeEntry.objects.filter(
+            is_approved=True,
+            source_type__in=source_types,
+        ).order_by("id")
+        raw_samples = build_training_samples(chain(treatment_queryset, knowledge_queryset))
         deduped_samples, duplicates_removed = dedupe_training_samples(raw_samples)
         filtered_samples, dropped_labels = filter_training_samples_by_label_frequency(
             deduped_samples,

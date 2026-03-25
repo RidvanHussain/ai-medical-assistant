@@ -1642,7 +1642,13 @@ audio {
     flex-wrap: wrap;
 }
 
+.inline-action-form {
+    display: inline-flex;
+    margin: 0;
+}
+
 .action-links a,
+.action-links button,
 .secondary-link {
     display: inline-flex;
     align-items: center;
@@ -1654,6 +1660,117 @@ audio {
     border: 1px solid var(--border);
     background: var(--surface-alt);
     color: var(--text);
+}
+
+.action-links button {
+    box-shadow: none;
+    cursor: pointer;
+}
+
+.action-links button:hover {
+    transform: none;
+    background: rgba(29, 78, 216, 0.08);
+}
+
+.is-hidden {
+    display: none !important;
+}
+
+.training-log-card,
+.upload-feedback-card,
+.warning-preview-card {
+    margin-top: 18px;
+    padding: 18px;
+    border-radius: 18px;
+    border: 1px solid var(--border);
+    background: var(--surface-alt);
+}
+
+.training-log {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: inherit;
+    line-height: 1.7;
+    color: var(--muted);
+}
+
+.training-progress-shell {
+    margin-top: 8px;
+}
+
+.warning-list {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+.warning-list li + li {
+    margin-top: 6px;
+}
+
+.upload-history-card {
+    gap: 14px;
+}
+
+.upload-history-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 14px;
+}
+
+.upload-status-pill {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.upload-status-processed {
+    background: rgba(15, 118, 110, 0.12);
+    color: var(--success);
+}
+
+.upload-status-success {
+    background: rgba(15, 118, 110, 0.12);
+    color: var(--success);
+}
+
+.upload-status-processed-with-warnings,
+.upload-status-partial {
+    background: rgba(245, 158, 11, 0.14);
+    color: var(--warning);
+}
+
+.upload-status-running {
+    background: rgba(37, 99, 235, 0.12);
+    color: var(--primary);
+}
+
+.upload-status-queued,
+.upload-status-failed {
+    background: rgba(124, 58, 237, 0.12);
+    color: #6d28d9;
+}
+
+.upload-status-failed {
+    background: rgba(220, 38, 38, 0.12);
+    color: var(--danger);
+}
+
+.upload-status-pending {
+    background: var(--primary-soft);
+    color: var(--primary);
+}
+
+.training-action-links {
+    margin-top: 18px;
 }
 
 .narrow-card {
@@ -2371,4 +2488,40 @@ audio {
 .chat-text ul.gpt-bullets li {
   margin: 3px 0;
   list-style: disc inside;
+}
+[dir="rtl"] body,
+[dir="rtl"] .app-shell,
+[dir="rtl"] .main-content,
+[dir="rtl"] .card,
+[dir="rtl"] .section-card,
+[dir="rtl"] .page-intro,
+[dir="rtl"] .page-intro-compact {
+    direction: rtl;
+    text-align: right;
+}
+
+[dir="rtl"] input,
+[dir="rtl"] textarea,
+[dir="rtl"] select {
+    text-align: right;
+}
+
+[dir="rtl"] .brand,
+[dir="rtl"] .quick-nav,
+[dir="rtl"] .header-actions,
+[dir="rtl"] .button-group,
+[dir="rtl"] .form-actions,
+[dir="rtl"] .comparison-legend,
+[dir="rtl"] .timeline-actions {
+    flex-direction: row-reverse;
+}
+
+[dir="rtl"] .profile-summary,
+[dir="rtl"] .profile-summary-item,
+[dir="rtl"] .chat-stats,
+[dir="rtl"] .chat-stat-item,
+[dir="rtl"] .session-card,
+[dir="rtl"] .history-message,
+[dir="rtl"] .timeline-case-panel {
+    text-align: right;
 }

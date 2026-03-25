@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model, login, logout, update_session_au
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
 from django.db.models import Prefetch, Q
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -31,6 +31,7 @@ from .models import (
     LoginActivity,
     MedicalAnalysis,
     PendingRegistration,
+    TrainingDatasetUpload,
     TreatmentEntry,
     UserProfile,
 )
@@ -38,15 +39,20 @@ from .qa_engine import answer_question
 from .selectors.dashboard import (
     build_dashboard_context,
     build_history_context,
+    build_training_control_context,
     get_featured_images,
     get_mobile_number,
     get_user_locations,
     get_visible_analysis_queryset,
 )
 from .selectors.profile import build_profile_workspace_context
+from .services.knowledge_base import build_sample_upload_zip, process_training_dataset_upload
+from .services.access_control import developer_training_required
 from .services.preferences import get_user_profile
 from .services.analysis import process_clinical_intake
 from .services.chat import get_or_create_session_for_user, process_chat_message, serialize_history
+from .services.retraining import enqueue_ai_model_refresh
+from .services.site_language import SITE_LANGUAGE_SESSION_KEY, get_request_language, normalize_language
 from .verification import issue_registration_otp_challenge
 
 load_dotenv()
@@ -119,6 +125,29 @@ def healthcheck_view(request):
     )
 
 
+def set_site_language_view(request):
+    requested_next = request.POST.get("next") or request.GET.get("next")
+    next_url = _resolve_safe_next_url(request, requested_next)
+    selected_language = normalize_language(request.POST.get("language") or request.GET.get("language"))
+    request.session[SITE_LANGUAGE_SESSION_KEY] = selected_language
+
+    if request.user.is_authenticated:
+        profile = get_user_profile(request.user)
+        if profile and profile.language_preference != selected_language:
+            profile.language_preference = selected_language
+            profile.save(update_fields=["language_preference", "updated_at"])
+
+    payload = {
+        "ok": True,
+        "language": selected_language,
+        "redirect_url": next_url,
+    }
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(payload)
+
+    return redirect(next_url)
+
+
 def index(request):
     context = process_clinical_intake(
         request,
@@ -146,6 +175,135 @@ def report_intake_view(request):
 @login_required
 def dashboard_view(request):
     return render(request, "dashboard.html", build_dashboard_context(request.user))
+
+
+@developer_training_required
+def training_control_view(request):
+    return render(request, "training_control_center.html", build_training_control_context())
+
+
+@developer_training_required
+def training_control_train_now_view(request):
+    if request.method != "POST":
+        return redirect("training_control")
+
+    next_url = _resolve_safe_next_url(request, request.POST.get("next"))
+    training_run, created = enqueue_ai_model_refresh(
+        run_reason=f"Manual training refresh by {request.user.get_username()}",
+        triggered_by=request.user,
+        trigger_type="manual",
+    )
+    payload = {
+        "ok": True,
+        "queued": created,
+        "run_id": training_run.id,
+        "message": (
+            "Training job queued successfully. The background worker will process it shortly."
+            if created
+            else "A training job is already queued or running, so a duplicate job was not added."
+        ),
+    }
+
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(payload, status=200)
+
+    if created:
+        messages.success(request, payload["message"])
+    else:
+        messages.info(request, payload["message"])
+    return redirect(next_url)
+
+
+@developer_training_required
+def training_control_upload_view(request):
+    if request.method != "POST":
+        return JsonResponse({"ok": False, "message": "Use POST to upload training datasets."}, status=405)
+
+    dataset_file = request.FILES.get("dataset_file")
+    if not dataset_file:
+        return JsonResponse({"ok": False, "message": "Select a CSV or ZIP dataset before uploading."}, status=400)
+
+    title = (request.POST.get("title") or dataset_file.name).strip() or dataset_file.name
+    source_label = (request.POST.get("source_label") or title).strip() or title
+    auto_retrain_requested = str(request.POST.get("auto_retrain_requested", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
+
+    upload = TrainingDatasetUpload.objects.create(
+        title=title,
+        source_label=source_label,
+        dataset_file=dataset_file,
+        auto_retrain_requested=auto_retrain_requested,
+        created_by=request.user,
+    )
+
+    try:
+        result = process_training_dataset_upload(upload, processed_by=request.user)
+    except Exception as error:
+        upload.status = TrainingDatasetUpload.STATUS_FAILED
+        upload.processed_at = timezone.now()
+        upload.processing_notes = str(error)
+        upload.summary_payload = {
+            "warning_count": 1,
+            "warnings": [str(error)],
+            "approved_created": 0,
+        }
+        upload.save(
+            update_fields=[
+                "status",
+                "processed_at",
+                "processing_notes",
+                "summary_payload",
+                "updated_at",
+            ]
+        )
+        return JsonResponse(
+            {
+                "ok": False,
+                "message": str(error),
+                "upload_id": upload.id,
+                "status": upload.status,
+                "status_label": upload.get_status_display(),
+                "warning_preview": [str(error)],
+                "error_report_url": upload.error_report_file.url if upload.error_report_file else "",
+            },
+            status=400,
+        )
+
+    upload.refresh_from_db()
+    warning_preview = result["warnings"][:8]
+    return JsonResponse(
+        {
+            "ok": True,
+            "message": (
+                f"Upload processed with status '{upload.get_status_display()}'. "
+                f"Created {result['created_rows']} entries and skipped {result['skipped_rows']} rows."
+            ),
+            "upload_id": upload.id,
+            "status": result["status"],
+            "status_label": upload.get_status_display(),
+            "title": upload.title,
+            "source_label": upload.source_label,
+            "total_rows": result["total_rows"],
+            "created_rows": result["created_rows"],
+            "skipped_rows": result["skipped_rows"],
+            "approved_created": result["approved_created"],
+            "warning_count": len(result["warnings"]),
+            "warning_preview": warning_preview,
+            "auto_retrain_requested": upload.auto_retrain_requested,
+            "error_report_url": upload.error_report_file.url if upload.error_report_file else "",
+        }
+    )
+
+
+@developer_training_required
+def training_control_sample_zip_view(request):
+    response = HttpResponse(build_sample_upload_zip(), content_type="application/zip")
+    response["Content-Disposition"] = 'attachment; filename="clinical_knowledge_sample_pack.zip"'
+    return response
 
 
 @login_required
@@ -307,6 +465,11 @@ def login_view(request):
 
     if request.method == "POST" and form.is_valid():
         login(request, form.get_user())
+        profile = get_user_profile(request.user)
+        request.session[SITE_LANGUAGE_SESSION_KEY] = get_request_language(
+            request,
+            user_profile=profile,
+        )
         messages.success(request, "Welcome back. Your dashboard is ready.")
         return redirect(next_url)
 
@@ -439,6 +602,12 @@ def register_verify_view(request, token):
 
                 pending_registration.delete()
                 login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+                if request.session.get(SITE_LANGUAGE_SESSION_KEY):
+                    profile = get_user_profile(user)
+                    selected_language = normalize_language(request.session[SITE_LANGUAGE_SESSION_KEY])
+                    if profile and profile.language_preference != selected_language:
+                        profile.language_preference = selected_language
+                        profile.save(update_fields=["language_preference", "updated_at"])
                 messages.success(request, "Your account has been created successfully.")
                 return redirect("dashboard")
 
@@ -465,7 +634,10 @@ def change_credentials_view(request):
         if form_type == "profile":
             profile_form = ProfileSettingsForm(request.POST, instance=request.user, prefix="profile")
             if profile_form.is_valid():
-                profile_form.save()
+                updated_user = profile_form.save()
+                request.session[SITE_LANGUAGE_SESSION_KEY] = normalize_language(
+                    updated_user.profile.language_preference
+                )
                 messages.success(request, "Profile details updated successfully.")
                 return redirect("change_credentials")
         elif form_type == "password":

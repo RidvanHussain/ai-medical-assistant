@@ -8,11 +8,17 @@ from django.utils import timezone
 
 from medical_app.analysis_engine import compare_analyses
 from medical_app.model_evaluation import load_evaluation_report
+from medical_app.services.access_control import can_access_training_console
+from medical_app.services.ai_configuration import get_ai_configuration
+from medical_app.services.knowledge_base import build_sample_archive_manifest
 from medical_app.models import (
+    AITrainingRun,
     ChatSession,
+    ClinicalKnowledgeEntry,
     FeaturedImage,
     LoginActivity,
     MedicalAnalysis,
+    TrainingDatasetUpload,
     TreatmentEntry,
     TreatmentTrainingRecord,
     UserProfile,
@@ -416,6 +422,148 @@ def _build_history_highlights(analysis_queryset, limit=4):
     return highlights
 
 
+def _build_staff_platform_totals():
+    version = _get_cache_version(DASHBOARD_VERSION_KEY)
+    cache_key = f"medical_app:staff_platform_totals:{version}"
+    totals = cache.get(cache_key)
+    if totals is not None:
+        return totals
+
+    totals = {
+        "registered_users": user_model.objects.count(),
+        "active_devices": LoginActivity.objects.filter(is_active=True).count(),
+        "clinical_analyses": MedicalAnalysis.objects.count(),
+    }
+    cache.set(cache_key, totals, DASHBOARD_CACHE_SECONDS)
+    return totals
+
+
+def _build_staff_training_status_widget():
+    version = _get_cache_version(DASHBOARD_VERSION_KEY)
+    cache_key = f"medical_app:staff_training_status:{version}"
+    cached_widget = cache.get(cache_key)
+    if cached_widget is not None:
+        return cached_widget
+
+    configuration = get_ai_configuration()
+    latest_upload = (
+        TrainingDatasetUpload.objects.only(
+            "title",
+            "status",
+            "created_at",
+            "error_report_file",
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    latest_training_run = (
+        AITrainingRun.objects.only("status", "started_at", "created_at")
+        .order_by("-created_at")
+        .first()
+    )
+    active_version = (
+        AITrainingRun.objects.filter(is_active_version=True)
+        .only("version_label", "created_at")
+        .order_by("-created_at")
+        .first()
+    )
+    run_summary = AITrainingRun.objects.aggregate(
+        queued_count=Count("id", filter=Q(status=AITrainingRun.STATUS_QUEUED)),
+    )
+    knowledge_summary = ClinicalKnowledgeEntry.objects.aggregate(
+        total_count=Count("id"),
+        approved_count=Count("id", filter=Q(is_approved=True)),
+    )
+
+    if configuration:
+        status_label = (configuration.last_training_status or "idle").replace("_", " ").title()
+        last_trained_at = configuration.last_trained_at
+        pending_records = configuration.pending_training_records
+    else:
+        status_label = "Not configured"
+        last_trained_at = None
+        pending_records = 0
+
+    widget = {
+        "status_label": status_label,
+        "last_trained_at": last_trained_at,
+        "pending_records": pending_records,
+        "knowledge_count": knowledge_summary["total_count"] or 0,
+        "approved_knowledge_count": knowledge_summary["approved_count"] or 0,
+        "latest_upload_title": latest_upload.title if latest_upload else "No upload yet",
+        "latest_upload_status": latest_upload.get_status_display() if latest_upload else "Not available",
+        "latest_upload_time": latest_upload.created_at if latest_upload else None,
+        "latest_upload_error_report_url": latest_upload.error_report_file.url
+        if latest_upload and latest_upload.error_report_file
+        else "",
+        "latest_training_run_status": latest_training_run.get_status_display() if latest_training_run else "No run yet",
+        "latest_training_run_started_at": latest_training_run.started_at if latest_training_run else None,
+        "active_version_label": active_version.version_label if active_version else "No active version",
+        "queued_run_count": run_summary["queued_count"] or 0,
+        "admin_upload_url": reverse("admin:medical_app_trainingdatasetupload_changelist"),
+        "admin_knowledge_url": reverse("admin:medical_app_clinicalknowledgeentry_changelist"),
+        "admin_config_url": reverse("admin:medical_app_aimodelconfiguration_changelist"),
+        "admin_training_runs_url": reverse("admin:medical_app_aitrainingrun_changelist"),
+        "template_download_url": reverse("admin:medical_app_trainingdatasetupload_download_template"),
+        "training_center_url": reverse("training_control"),
+        "train_now_url": reverse("training_control_train_now"),
+        "sample_zip_url": reverse("training_control_sample_zip"),
+        "worker_command": "python manage.py run_training_worker --continuous",
+    }
+    cache.set(cache_key, widget, DASHBOARD_CACHE_SECONDS)
+    return widget
+
+
+def build_training_control_context():
+    configuration = get_ai_configuration()
+    latest_uploads = list(
+        TrainingDatasetUpload.objects.select_related("created_by").order_by("-created_at")[:8]
+    )
+    recent_training_runs = list(
+        AITrainingRun.objects.select_related("triggered_by").order_by("-created_at")[:8]
+    )
+
+    recent_uploads = []
+    for upload in latest_uploads:
+        summary_payload = upload.summary_payload or {}
+        recent_uploads.append(
+            {
+                "title": upload.title,
+                "source_label": upload.source_label or "Not provided",
+                "status_label": upload.get_status_display(),
+                "created_rows": upload.created_rows,
+                "skipped_rows": upload.skipped_rows,
+                "total_rows": upload.total_rows,
+                "auto_retrain_requested": upload.auto_retrain_requested,
+                "processed_at": upload.processed_at,
+                "created_at": upload.created_at,
+                "created_by": upload.created_by.get_username() if upload.created_by else "System",
+                "warnings": summary_payload.get("warnings", [])[:6],
+                "warning_count": int(summary_payload.get("warning_count", 0) or 0),
+                "approved_created": int(summary_payload.get("approved_created", 0) or 0),
+                "processing_notes": upload.processing_notes,
+                "error_report_url": upload.error_report_file.url if upload.error_report_file else "",
+            }
+        )
+
+    training_status_widget = _build_staff_training_status_widget()
+    return {
+        "training_status_widget": training_status_widget,
+        "recent_uploads": recent_uploads,
+        "recent_training_runs": recent_training_runs,
+        "latest_training_message": configuration.last_training_message if configuration else "",
+        "sample_archive_manifest": build_sample_archive_manifest(),
+        "upload_post_url": reverse("training_control_upload"),
+        "train_now_url": reverse("training_control_train_now"),
+        "sample_zip_url": reverse("training_control_sample_zip"),
+        "admin_upload_url": reverse("admin:medical_app_trainingdatasetupload_changelist"),
+        "admin_knowledge_url": reverse("admin:medical_app_clinicalknowledgeentry_changelist"),
+        "admin_config_url": reverse("admin:medical_app_aimodelconfiguration_changelist"),
+        "admin_training_runs_url": reverse("admin:medical_app_aitrainingrun_changelist"),
+        "template_download_url": reverse("admin:medical_app_trainingdatasetupload_download_template"),
+    }
+
+
 def build_dashboard_context(user):
     version = _get_cache_version(DASHBOARD_VERSION_KEY)
     cache_key = f"medical_app:dashboard:{version}:user:{user.id}:staff:{int(user.is_staff)}"
@@ -449,20 +597,21 @@ def build_dashboard_context(user):
     approved_training_count = training_summary["approved_count"]
 
     if user.is_staff:
+        platform_totals = _build_staff_platform_totals()
         dashboard_stats = [
             {
                 "label": "Registered users",
-                "value": user_model.objects.count(),
+                "value": platform_totals["registered_users"],
                 "helper": "Total members stored in the platform.",
             },
             {
                 "label": "Active devices",
-                "value": LoginActivity.objects.filter(is_active=True).count(),
+                "value": platform_totals["active_devices"],
                 "helper": "Current authenticated sessions across the platform.",
             },
             {
                 "label": "Clinical analyses",
-                "value": MedicalAnalysis.objects.count(),
+                "value": platform_totals["clinical_analyses"],
                 "helper": "Saved image, symptom, and report analysis records.",
             },
             {
@@ -546,6 +695,7 @@ def build_dashboard_context(user):
         "public_treatment_summaries": _build_public_treatment_summaries(),
         "training_dataset_summary": training_summary,
         "model_evaluation_summary": model_evaluation_summary,
+        "training_status_widget": _build_staff_training_status_widget() if can_access_training_console(user) else None,
         "alerts": _build_alerts(
             high_risk_count=analysis_summary["high_risk_count"],
             low_confidence_count=analysis_summary["low_confidence_count"],
@@ -584,7 +734,14 @@ def build_history_context(user, session_id=None, search="", risk=""):
 
     messages = []
     if selected_session:
-        messages = list(selected_session.messages.order_by("created_at"))
+        messages = list(
+            selected_session.messages.only(
+                "role",
+                "text",
+                "attachment",
+                "created_at",
+            ).order_by("created_at")
+        )
 
     analysis_queryset = (
         base_history_queryset

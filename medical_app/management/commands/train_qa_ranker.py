@@ -1,4 +1,5 @@
 import pickle
+from collections import Counter
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
@@ -7,9 +8,11 @@ from sklearn.model_selection import train_test_split
 
 from medical_app.dataset_importer import (
     QA_DATASET_SUMMARY_PATH,
+    dedupe_qa_entries,
     load_qa_corpus_entries,
     save_dataset_summary,
 )
+from medical_app.models import ClinicalKnowledgeEntry, TreatmentTrainingRecord
 from medical_app.qa_engine import (
     DEFAULT_QA_SCORE_THRESHOLD,
     QA_CORPUS_PATH,
@@ -18,6 +21,10 @@ from medical_app.qa_engine import (
     QARetriever,
     save_qa_corpus,
     save_qa_metrics,
+)
+from medical_app.services.knowledge_base import (
+    build_qa_entries_from_knowledge_entries,
+    build_qa_entries_from_training_records,
 )
 
 
@@ -74,16 +81,39 @@ class Command(BaseCommand):
             default=DEFAULT_QA_SCORE_THRESHOLD,
             help="Minimum similarity score required to use a local QA answer at runtime.",
         )
+        parser.add_argument(
+            "--exclude-approved-db",
+            action="store_true",
+            help="Only use external clean datasets and skip approved doctor/admin knowledge from the database.",
+        )
 
     def handle(self, *args, **options):
         train_ratio = options["train_ratio"]
         if not 0 < train_ratio < 1:
             raise CommandError("The training ratio must be between 0 and 1.")
 
-        corpus_entries, dataset_summary = load_qa_corpus_entries(
+        external_entries, dataset_summary = load_qa_corpus_entries(
             datasets_dir=options["datasets_dir"],
-            dedupe=options["dedupe"],
+            dedupe=False,
         )
+        corpus_entries = list(external_entries)
+        db_training_entries = []
+        db_knowledge_entries = []
+
+        if not options["exclude_approved_db"]:
+            db_training_entries = build_qa_entries_from_training_records(
+                TreatmentTrainingRecord.objects.filter(is_approved=True).order_by("id")
+            )
+            db_knowledge_entries = build_qa_entries_from_knowledge_entries(
+                ClinicalKnowledgeEntry.objects.filter(is_approved=True).order_by("id")
+            )
+            corpus_entries.extend(db_training_entries)
+            corpus_entries.extend(db_knowledge_entries)
+
+        duplicates_removed = 0
+        if options["dedupe"]:
+            corpus_entries, duplicates_removed = dedupe_qa_entries(corpus_entries)
+
         if len(corpus_entries) < 2:
             raise CommandError("At least 2 QA entries are required to build and evaluate the QA ranker.")
 
@@ -161,6 +191,29 @@ class Command(BaseCommand):
             "test_results": evaluation_results,
         }
         metrics_path = save_qa_metrics(metrics, options["metrics_output"])
+        dataset_summary.update(
+            {
+                "approved_db": {
+                    "training_record_entries": len(db_training_entries),
+                    "knowledge_entries": len(db_knowledge_entries),
+                },
+                "total_entries_before_dedupe": len(external_entries) + len(db_training_entries) + len(db_knowledge_entries),
+                "total_entries_after_dedupe": len(corpus_entries),
+                "duplicates_removed": duplicates_removed,
+                "source_distribution": dict(
+                    sorted(
+                        Counter(entry["source"] for entry in corpus_entries).items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                ),
+                "condition_distribution": dict(
+                    sorted(
+                        Counter(entry["condition"] for entry in corpus_entries if entry.get("condition")).items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                ),
+            }
+        )
         summary_path = save_dataset_summary(dataset_summary, options["summary_output"])
 
         self.stdout.write(

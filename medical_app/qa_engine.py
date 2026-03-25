@@ -2,9 +2,16 @@ import json
 import pickle
 from pathlib import Path
 
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
 
 from .analysis_engine import MODEL_DIR
+from .models import ClinicalKnowledgeEntry, TreatmentTrainingRecord
+from .services.ai_configuration import get_ai_configuration
+from .services.knowledge_base import (
+    build_qa_entries_from_knowledge_entries,
+    build_qa_entries_from_training_records,
+)
 
 
 QA_RANKER_PATH = MODEL_DIR / "qa_ranker.pkl"
@@ -12,6 +19,7 @@ QA_CORPUS_PATH = MODEL_DIR / "qa_corpus.jsonl"
 QA_METRICS_PATH = MODEL_DIR / "qa_metrics.json"
 DEFAULT_QA_SCORE_THRESHOLD = 0.2
 _QA_RETRIEVER_CACHE = {}
+_RUNTIME_DB_RETRIEVER_CACHE = {}
 
 
 class QARetriever:
@@ -78,7 +86,7 @@ def load_qa_retriever(model_path=QA_RANKER_PATH):
     cache_key = str(model_path)
     if not model_path.exists():
         _QA_RETRIEVER_CACHE.pop(cache_key, None)
-        return None
+        return _build_runtime_db_retriever()
 
     file_signature = (model_path.stat().st_mtime_ns, model_path.stat().st_size)
     cached_entry = _QA_RETRIEVER_CACHE.get(cache_key)
@@ -98,7 +106,64 @@ def load_qa_retriever(model_path=QA_RANKER_PATH):
             "signature": file_signature,
             "retriever": None,
         }
+        return _build_runtime_db_retriever()
+
+
+def invalidate_runtime_db_retriever_cache():
+    _RUNTIME_DB_RETRIEVER_CACHE.clear()
+
+
+def _build_runtime_db_retriever():
+    cached_entry = _RUNTIME_DB_RETRIEVER_CACHE.get("approved_db")
+    if cached_entry is not None:
+        return cached_entry["retriever"]
+
+    corpus_entries = build_qa_entries_from_training_records(
+        TreatmentTrainingRecord.objects.filter(is_approved=True)
+        .only(
+            "input_text",
+            "target_condition",
+            "target_specialization",
+            "target_treatment",
+            "ai_context",
+            "source_type",
+        )
+        .order_by("id")
+    )
+    corpus_entries.extend(
+        build_qa_entries_from_knowledge_entries(
+            ClinicalKnowledgeEntry.objects.filter(is_approved=True)
+            .only(
+                "input_text",
+                "target_condition",
+                "target_specialization",
+                "target_treatment",
+                "ai_context",
+                "source_type",
+            )
+            .order_by("id")
+        )
+    )
+    if len(corpus_entries) < 2:
+        _RUNTIME_DB_RETRIEVER_CACHE["approved_db"] = {"retriever": None}
         return None
+
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        ngram_range=(1, 2),
+        min_df=1,
+        strip_accents="unicode",
+        sublinear_tf=True,
+    )
+    question_matrix = vectorizer.fit_transform([entry["question"] for entry in corpus_entries])
+    retriever = QARetriever(
+        vectorizer=vectorizer,
+        question_matrix=question_matrix,
+        corpus_entries=corpus_entries,
+        min_confidence=float(get_ai_configuration().qa_min_confidence or DEFAULT_QA_SCORE_THRESHOLD),
+    )
+    _RUNTIME_DB_RETRIEVER_CACHE["approved_db"] = {"retriever": retriever}
+    return retriever
 
 
 def answer_question(question_text, model_path=QA_RANKER_PATH):

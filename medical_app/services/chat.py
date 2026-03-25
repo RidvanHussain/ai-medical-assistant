@@ -3,13 +3,20 @@ from pathlib import Path
 from django.utils import timezone
 
 from medical_app.models import ChatMessage, ChatSession
+from medical_app.services.ai_configuration import (
+    DEFAULT_MEDICAL_MODEL,
+    build_generation_settings,
+    get_chat_model_name,
+    get_system_prompt,
+)
 from medical_app.services.preferences import build_health_context, build_prompt_behavior_lines
 
 
-MEDICAL_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+MEDICAL_MODEL = DEFAULT_MEDICAL_MODEL
 
 
 def build_chat_prompt(patient_text, user_profile=None):
+    system_prompt = get_system_prompt()
     prompt_lines = [
         "You are a professional medical assistant.",
         "Give general educational guidance only and encourage urgent care for emergency symptoms.",
@@ -20,6 +27,8 @@ def build_chat_prompt(patient_text, user_profile=None):
         "3) Short conclusion with practical next steps.",
         f"Patient question: {patient_text}",
     ]
+    if system_prompt:
+        prompt_lines.insert(2, system_prompt)
     health_context = build_health_context(user_profile)
     if health_context:
         prompt_lines.append(health_context)
@@ -74,7 +83,7 @@ def process_chat_message(
     image_encoder,
     local_qa_answerer,
     user_profile=None,
-    medical_model=MEDICAL_MODEL,
+    medical_model=None,
 ):
     user_message = ChatMessage.objects.create(
         session=session,
@@ -106,11 +115,13 @@ def process_chat_message(
         ai_response = build_local_qa_response(local_qa_result)
     else:
         try:
+            model_name = medical_model or get_chat_model_name()
             ai_response = ai_analyzer(
                 query=build_chat_prompt(prompt_text, user_profile=user_profile),
                 encoded_image=encoded_image,
-                model=medical_model,
+                model=model_name,
                 mime_type=mime_type,
+                **build_generation_settings(),
             )
         except Exception:
             ai_response = "I could not generate a response right now. Please try again in a moment."

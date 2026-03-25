@@ -1,14 +1,45 @@
 from datetime import timedelta
 
+from django.utils import translation
 from django.utils import timezone
 
 from .models import LoginActivity, UserProfile
+from .services.site_language import (
+    SITE_LANGUAGE_SESSION_KEY,
+    get_language_locale,
+    get_request_language,
+)
 
 
 LOGIN_ACTIVITY_SYNC_INTERVAL = timedelta(minutes=5)
 LAST_SYNC_SESSION_KEY = "medical_app_login_sync_ts"
 LAST_FINGERPRINT_SESSION_KEY = "medical_app_login_sync_fingerprint"
 PROFILE_READY_SESSION_KEY = "medical_app_profile_ready"
+
+
+class SiteLanguageMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        user_profile = None
+        user = getattr(request, "user", None)
+        if getattr(user, "is_authenticated", False):
+            user_profile = getattr(user, "profile", None)
+
+        site_language = get_request_language(request, user_profile=user_profile)
+        locale = get_language_locale(site_language)
+        request.site_language = site_language
+        request.LANGUAGE_CODE = locale
+        translation.activate(locale)
+
+        if getattr(request, "session", None) is not None:
+            request.session[SITE_LANGUAGE_SESSION_KEY] = site_language
+
+        response = self.get_response(request)
+        response.headers["Content-Language"] = locale
+        translation.deactivate()
+        return response
 
 
 def _get_client_ip(request):
@@ -119,13 +150,20 @@ class CurrentLoginActivityMiddleware:
             if should_refresh or not request.session.get(PROFILE_READY_SESSION_KEY):
                 profile, _ = UserProfile.objects.get_or_create(
                     user=request.user,
-                    defaults={"mobile_number": "", "last_known_location": location_label},
+                    defaults={
+                        "mobile_number": "",
+                        "last_known_location": location_label,
+                        "training_console_enabled": bool(request.user.is_superuser),
+                    },
                 )
                 request.session[PROFILE_READY_SESSION_KEY] = True
 
             if profile and should_refresh and profile.last_known_location != location_label:
                 profile.last_known_location = location_label
                 profile.save(update_fields=["last_known_location", "updated_at"])
+            elif profile and request.user.is_superuser and not profile.training_console_enabled:
+                profile.training_console_enabled = True
+                profile.save(update_fields=["training_console_enabled", "updated_at"])
 
             request.session[LAST_SYNC_SESSION_KEY] = now_timestamp
             request.session[LAST_FINGERPRINT_SESSION_KEY] = current_fingerprint

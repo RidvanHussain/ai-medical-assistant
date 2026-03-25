@@ -20,7 +20,7 @@ _JSON_ARTIFACT_CACHE = {}
 def build_training_samples(queryset):
     return [
         {
-            "record_id": record.id,
+            "record_id": f"{record.__class__.__name__}:{record.id}",
             "text": record.input_text.strip(),
             "label": record.target_condition.strip(),
             "source_type": record.source_type,

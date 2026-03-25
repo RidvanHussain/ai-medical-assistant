@@ -3,13 +3,14 @@ import json
 import shutil
 import uuid
 import zipfile
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core import mail
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -19,15 +20,20 @@ from .analysis_engine import analyze_report_text
 from .dataset_importer import load_classifier_records, load_qa_corpus_entries
 from .model_evaluation import load_evaluation_report
 from .models import (
+    AIModelConfiguration,
+    AITrainingRun,
     ChatMessage,
+    ClinicalKnowledgeEntry,
     FeaturedImage,
     LoginActivity,
     MedicalAnalysis,
     PendingRegistration,
+    TrainingDatasetUpload,
     TreatmentEntry,
     TreatmentTrainingRecord,
     UserProfile,
 )
+from .services.site_language import SITE_LANGUAGE_SESSION_KEY
 
 user_model = get_user_model()
 
@@ -106,6 +112,52 @@ class PublicPageTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+
+class SiteLanguageTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = user_model.objects.create_user(
+            username="language_user",
+            email="language_user@example.com",
+            password="SecurePass123!",
+        )
+        UserProfile.objects.update_or_create(
+            user=self.user,
+            defaults={"mobile_number": "9999991111"},
+        )
+
+    def test_anonymous_language_switch_updates_session(self):
+        response = self.client.get(
+            reverse("set_site_language"),
+            {
+                "language": "hindi",
+                "next": reverse("index"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("index"))
+        self.assertEqual(self.client.session[SITE_LANGUAGE_SESSION_KEY], "hindi")
+
+    def test_authenticated_language_switch_updates_profile_and_session(self):
+        self.client.login(username="language_user", password="SecurePass123!")
+
+        response = self.client.get(
+            reverse("set_site_language"),
+            {
+                "language": "arabic",
+                "next": reverse("dashboard"),
+            },
+        )
+
+        self.user.refresh_from_db()
+        self.user.profile.refresh_from_db()
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("dashboard"))
+        self.assertEqual(self.client.session[SITE_LANGUAGE_SESSION_KEY], "arabic")
+        self.assertEqual(self.user.profile.language_preference, "arabic")
 
 
 class LoginPageTests(TestCase):
@@ -587,6 +639,56 @@ class ChatTests(TestCase):
         self.assertIn("clinical tone", prompt)
 
 
+class QARuntimeCacheTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        from . import qa_engine
+
+        qa_engine._QA_RETRIEVER_CACHE.clear()
+        qa_engine._RUNTIME_DB_RETRIEVER_CACHE.clear()
+        ClinicalKnowledgeEntry.objects.create(
+            title="Electrolyte support",
+            input_text="muscle cramps and weakness after dehydration",
+            target_condition="Electrolyte Imbalance",
+            target_specialization="Internal Medicine",
+            target_treatment="Use oral electrolyte solution and review hydration status.",
+            quality_score=90,
+            is_approved=True,
+        )
+        ClinicalKnowledgeEntry.objects.create(
+            title="Migraine support",
+            input_text="severe headache with light sensitivity and nausea",
+            target_condition="Migraine",
+            target_specialization="Neurology",
+            target_treatment="Rest in a dark room and use clinician-approved pain relief.",
+            quality_score=90,
+            is_approved=True,
+        )
+
+    def test_runtime_db_qa_retriever_uses_warm_cache_without_repeat_queries(self):
+        from . import qa_engine
+        from .services.ai_configuration import get_ai_configuration
+
+        get_ai_configuration()
+        missing_model_path = Path("medical_app/ml_models/runtime-cache-missing.pkl")
+
+        with self.assertNumQueries(2):
+            first_result = qa_engine.answer_question(
+                "muscle cramps and weakness",
+                model_path=missing_model_path,
+            )
+
+        self.assertTrue(first_result["used_local_qa"])
+
+        with self.assertNumQueries(0):
+            second_result = qa_engine.answer_question(
+                "muscle cramps and weakness",
+                model_path=missing_model_path,
+            )
+
+        self.assertEqual(first_result["answer"], second_result["answer"])
+
+
 class DashboardTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -600,7 +702,10 @@ class DashboardTests(TestCase):
         )
         UserProfile.objects.update_or_create(
             user=self.admin_user,
-            defaults={"mobile_number": "9999999999"},
+            defaults={
+                "mobile_number": "9999999999",
+                "training_console_enabled": True,
+            },
         )
         LoginActivity.objects.create(
             user=self.admin_user,
@@ -664,6 +769,11 @@ class DashboardTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "User Management")
         self.assertContains(response, "Admin Manager")
+        self.assertContains(response, "Live Training Status")
+        self.assertContains(response, "Train Now")
+        self.assertContains(response, "Open Training Center")
+        self.assertContains(response, "Download Sample ZIP")
+        self.assertContains(response, "Download Import Template")
 
     def test_member_dashboard_shows_shared_treatment_summary_without_private_details(self):
         self.client.login(username="member_user", password="SecurePass123!")
@@ -677,6 +787,8 @@ class DashboardTests(TestCase):
         self.assertNotContains(response, "Dr. Private Detail")
         self.assertNotContains(response, "DOC-909")
         self.assertNotContains(response, "555-9090")
+        self.assertNotContains(response, "Live Training Status")
+        self.assertNotContains(response, "Download Import Template")
 
     def test_dashboard_page_loads_page_specific_script(self):
         self.client.login(username="admin_user", password="SecurePass123!")
@@ -812,6 +924,67 @@ class ClinicalAnalysisTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "upload.js")
+
+    @patch("medical_app.views.text_to_speech_with_edge")
+    @patch("medical_app.views.analyze_image_with_query", return_value="Structured clinical summary.")
+    def test_index_uses_site_language_for_response_and_audio(self, mock_ai, mock_tts):
+        session = self.client.session
+        session[SITE_LANGUAGE_SESSION_KEY] = "hindi"
+        session.save()
+
+        response = self.client.post(
+            reverse("index"),
+            {
+                "symptoms": "Persistent cough with mild fever for three days",
+                "report_notes": "Inflammation markers are elevated.",
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        prompt = mock_ai.call_args.kwargs["query"]
+        self.assertIn("Respond in hindi.", prompt)
+        self.assertEqual(mock_tts.call_args.kwargs["language"], "hindi")
+
+    @patch(
+        "medical_app.services.analysis.analyze_image_record",
+        return_value={
+            "predicted_condition": "General review required",
+            "confidence_score": 0,
+            "model_source": "heuristic",
+        },
+    )
+    @patch("medical_app.services.analysis.analyze_report_text")
+    @patch("medical_app.views.analyze_image_with_query", return_value="Structured report summary.")
+    def test_report_workspace_reuses_cached_report_analysis_for_identical_input(
+        self,
+        mock_ai,
+        mock_report_analysis,
+        mock_image_insights,
+    ):
+        self.user.profile.voice_summary_enabled = False
+        self.user.profile.save(update_fields=["voice_summary_enabled", "updated_at"])
+        mock_report_analysis.return_value = {
+            "predicted_condition": "Infection",
+            "detected_conditions_count": 1,
+            "risk_level": "Medium",
+            "confidence_score": 0.74,
+            "disease_percentage": 25.0,
+            "model_source": "heuristic",
+        }
+        self.client.login(username="doctor_user", password="SecurePass123!")
+
+        response = self.client.post(
+            reverse("report_intake"),
+            {
+                "report_notes": "Current report shows disease burden at 25% with improved response.",
+                "language": "english",
+            },
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_report_analysis.call_count, 1)
 
     @patch("medical_app.views.text_to_speech_with_edge")
     @patch("medical_app.views.analyze_image_with_query", return_value="Structured report summary.")
@@ -1160,6 +1333,454 @@ class TrainingPipelineTests(TestCase):
             cleanup_scratch_dir(dataset_dir)
 
 
+class AdminKnowledgePipelineTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = user_model.objects.create_user(
+            username="knowledge_admin",
+            email="knowledge_admin@example.com",
+            password="SecurePass123!",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.staff_user = user_model.objects.create_user(
+            username="limited_staff",
+            email="limited_staff@example.com",
+            password="SecurePass123!",
+            is_staff=True,
+        )
+
+    def test_bulk_training_upload_creates_knowledge_entries_and_updates_pending_queue(self):
+        from .services.knowledge_base import process_training_dataset_upload
+
+        csv_content = "\n".join(
+            [
+                "title,input_text,target_condition,target_specialization,target_treatment,quality_score,is_approved",
+                "Respiratory Intake,patient has persistent cough and wheeze,Respiratory,Pulmonology,Start inhaler and pulmonary follow-up,92,true",
+                "Infection Intake,fever with sore throat and fatigue,Infection,Internal Medicine,Hydration and antibiotic review,88,true",
+            ]
+        )
+        upload = TrainingDatasetUpload.objects.create(
+            title="Admin knowledge batch",
+            source_label="semester-demo-upload",
+            dataset_file=SimpleUploadedFile(
+                "knowledge-upload.csv",
+                csv_content.encode("utf-8"),
+                content_type="text/csv",
+            ),
+            created_by=self.user,
+        )
+
+        result = process_training_dataset_upload(upload, processed_by=self.user)
+        upload.refresh_from_db()
+        configuration = AIModelConfiguration.objects.get(configuration_key="default")
+
+        self.assertEqual(result["created_rows"], 2)
+        self.assertEqual(upload.status, TrainingDatasetUpload.STATUS_PROCESSED)
+        self.assertEqual(ClinicalKnowledgeEntry.objects.count(), 2)
+        self.assertEqual(configuration.pending_training_records, 2)
+
+    def test_admin_template_download_requires_developer_access_and_returns_csv(self):
+        response = self.client.get("/admin/medical_app/trainingdatasetupload/download-template/")
+        self.assertEqual(response.status_code, 302)
+
+        self.client.login(username="knowledge_admin", password="SecurePass123!")
+        response = self.client.get("/admin/medical_app/trainingdatasetupload/download-template/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/csv")
+        self.assertIn("attachment; filename=", response["Content-Disposition"])
+        self.assertContains(
+            response,
+            "title,input_text,target_condition,target_specialization,target_treatment,quality_score,is_approved,ai_context,review_notes",
+        )
+
+    def test_admin_template_download_denies_non_developer_staff(self):
+        self.client.login(username="limited_staff", password="SecurePass123!")
+
+        response = self.client.get("/admin/medical_app/trainingdatasetupload/download-template/")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_training_control_center_requires_developer_access_and_shows_secure_controls(self):
+        response = self.client.get(reverse("training_control"))
+        self.assertEqual(response.status_code, 302)
+
+        self.client.login(username="knowledge_admin", password="SecurePass123!")
+        response = self.client.get(reverse("training_control"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Developer Training Control")
+        self.assertContains(response, "Train Now")
+        self.assertContains(response, "Download Sample ZIP")
+        self.assertContains(response, "run_training_worker --continuous")
+        self.assertContains(response, "training_admin.js")
+
+    def test_training_control_center_denies_non_developer_staff(self):
+        self.client.login(username="limited_staff", password="SecurePass123!")
+
+        response = self.client.get(reverse("training_control"))
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_dashboard_hides_training_widget_for_non_developer_staff(self):
+        self.client.login(username="limited_staff", password="SecurePass123!")
+
+        response = self.client.get(reverse("dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Live Training Status")
+
+    @patch("medical_app.views.enqueue_ai_model_refresh")
+    def test_training_control_train_now_queues_refresh_for_staff(self, mock_enqueue):
+        mock_enqueue.return_value = (
+            AITrainingRun(
+                id=77,
+                version_label="vtest",
+                status=AITrainingRun.STATUS_QUEUED,
+            ),
+            True,
+        )
+        self.client.login(username="knowledge_admin", password="SecurePass123!")
+
+        response = self.client.post(
+            reverse("training_control_train_now"),
+            {"next": reverse("training_control")},
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "queued successfully")
+        mock_enqueue.assert_called_once()
+        _, enqueue_kwargs = mock_enqueue.call_args
+        self.assertEqual(enqueue_kwargs["triggered_by"], self.user)
+        self.assertEqual(enqueue_kwargs["trigger_type"], "manual")
+
+    def test_queue_training_refresh_enqueues_background_job_when_threshold_is_reached(self):
+        from .services.ai_configuration import get_ai_configuration
+        from .services.retraining import queue_training_refresh
+
+        configuration = get_ai_configuration()
+        configuration.auto_retrain_enabled = True
+        configuration.auto_retrain_after_manual_entry = True
+        configuration.min_new_records_for_retrain = 1
+        configuration.retrain_cooldown_minutes = 0
+        configuration.last_trained_at = None
+        configuration.pending_training_records = 0
+        configuration.last_training_status = "idle"
+        configuration.save(
+            update_fields=[
+                "auto_retrain_enabled",
+                "auto_retrain_after_manual_entry",
+                "min_new_records_for_retrain",
+                "retrain_cooldown_minutes",
+                "last_trained_at",
+                "pending_training_records",
+                "last_training_status",
+                "updated_at",
+            ]
+        )
+
+        pending_records = queue_training_refresh(
+            record_count=1,
+            trigger_type="manual_entry",
+            reason="Queue threshold test",
+        )
+
+        configuration.refresh_from_db()
+        queued_run = AITrainingRun.objects.get()
+
+        self.assertEqual(pending_records, 1)
+        self.assertEqual(queued_run.status, AITrainingRun.STATUS_QUEUED)
+        self.assertEqual(configuration.last_training_status, "queued")
+
+    @patch("medical_app.services.retraining._safe_load_json")
+    @patch("medical_app.services.retraining.call_command")
+    def test_process_next_training_run_executes_queued_job(self, mock_call_command, mock_safe_load_json):
+        from .services.ai_configuration import get_ai_configuration
+        from .services.retraining import enqueue_ai_model_refresh, process_next_training_run
+
+        mock_safe_load_json.side_effect = [
+            {
+                "accuracy_percent": 70.0,
+                "macro_f1": 0.59,
+                "weighted_f1": 0.68,
+                "total_records": 31,
+            },
+            {
+                "hit_rate_at_1_percent": 54.0,
+                "average_score": 0.81,
+                "corpus_count": 17,
+            },
+        ]
+
+        configuration = get_ai_configuration()
+        configuration.pending_training_records = 4
+        configuration.last_training_status = "idle"
+        configuration.last_trained_at = None
+        configuration.save(
+            update_fields=[
+                "pending_training_records",
+                "last_training_status",
+                "last_trained_at",
+                "updated_at",
+            ]
+        )
+
+        queued_run, created = enqueue_ai_model_refresh(
+            run_reason="Queued developer trigger",
+            configuration=configuration,
+            triggered_by=self.user,
+            trigger_type="manual",
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(queued_run.status, AITrainingRun.STATUS_QUEUED)
+
+        processed_run = process_next_training_run()
+        configuration.refresh_from_db()
+        queued_run.refresh_from_db()
+
+        self.assertEqual(mock_call_command.call_count, 2)
+        self.assertEqual(processed_run.pk, queued_run.pk)
+        self.assertEqual(queued_run.status, AITrainingRun.STATUS_SUCCESS)
+        self.assertTrue(queued_run.is_active_version)
+        self.assertEqual(configuration.pending_training_records, 0)
+        self.assertEqual(configuration.last_training_status, "success")
+
+    @patch("medical_app.management.commands.run_training_worker.process_next_training_run")
+    def test_run_training_worker_once_reports_processed_job(self, mock_process_next_training_run):
+        training_run = AITrainingRun.objects.create(
+            version_label="vworker",
+            run_reason="Worker test",
+            status=AITrainingRun.STATUS_SUCCESS,
+            trigger_type="manual",
+        )
+        mock_process_next_training_run.return_value = training_run
+
+        output = StringIO()
+        call_command("run_training_worker", "--once", stdout=output)
+
+        command_output = output.getvalue()
+        self.assertIn("Training worker started.", command_output)
+        self.assertIn("Processed vworker: success.", command_output)
+        self.assertIn("processing 1 job(s)", command_output)
+
+    @patch("medical_app.services.retraining._safe_load_json")
+    @patch("medical_app.services.retraining.call_command")
+    def test_refresh_ai_models_creates_versioned_training_run(self, mock_call_command, mock_safe_load_json):
+        from .services.ai_configuration import get_ai_configuration
+        from .services.retraining import refresh_ai_models
+
+        mock_safe_load_json.side_effect = [
+            {
+                "accuracy_percent": 73.4,
+                "macro_f1": 0.61,
+                "weighted_f1": 0.69,
+                "total_records": 42,
+            },
+            {
+                "hit_rate_at_1_percent": 58.0,
+                "average_score": 0.87,
+                "corpus_count": 19,
+            },
+        ]
+
+        configuration = get_ai_configuration()
+        configuration.pending_training_records = 7
+        configuration.save(update_fields=["pending_training_records", "updated_at"])
+
+        succeeded = refresh_ai_models(
+            run_reason="Developer trigger test",
+            configuration=configuration,
+            triggered_by=self.user,
+            trigger_type="manual",
+        )
+
+        self.assertTrue(succeeded)
+        self.assertEqual(mock_call_command.call_count, 2)
+
+        run = AITrainingRun.objects.get()
+        self.assertEqual(run.status, AITrainingRun.STATUS_SUCCESS)
+        self.assertEqual(run.triggered_by, self.user)
+        self.assertEqual(run.pending_record_snapshot, 7)
+        self.assertTrue(run.is_active_version)
+        self.assertEqual(run.classifier_record_count, 42)
+        self.assertEqual(run.qa_corpus_count, 19)
+
+        configuration.refresh_from_db()
+        self.assertEqual(configuration.pending_training_records, 0)
+        self.assertEqual(configuration.last_training_status, "success")
+
+    def test_training_control_upload_returns_warning_preview_json(self):
+        self.client.login(username="knowledge_admin", password="SecurePass123!")
+
+        csv_content = "\n".join(
+            [
+                "title,input_text,target_condition,target_specialization,target_treatment,quality_score,is_approved",
+                "Valid respiratory row,persistent cough and wheeze,Respiratory,Pulmonology,Review inhaler use,90,true",
+                "Broken row,headache with nausea,,Neurology,Review migraine support,80,true",
+            ]
+        )
+
+        response = self.client.post(
+            reverse("training_control_upload"),
+            {
+                "title": "Warning preview batch",
+                "source_label": "developer-preview",
+                "auto_retrain_requested": "true",
+                "dataset_file": SimpleUploadedFile(
+                    "warning-preview.csv",
+                    csv_content.encode("utf-8"),
+                    content_type="text/csv",
+                ),
+            },
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["created_rows"], 1)
+        self.assertEqual(payload["skipped_rows"], 1)
+        self.assertEqual(payload["warning_count"], 1)
+        self.assertIn("Row 3", payload["warning_preview"][0])
+        self.assertTrue(payload["error_report_url"])
+        self.assertEqual(ClinicalKnowledgeEntry.objects.count(), 1)
+
+        upload = TrainingDatasetUpload.objects.get(title="Warning preview batch")
+        self.assertTrue(bool(upload.error_report_file))
+        self.assertEqual(upload.skipped_rows, 1)
+
+    def test_training_control_sample_zip_requires_developer_access_and_contains_multiple_examples(self):
+        response = self.client.get(reverse("training_control_sample_zip"))
+        self.assertEqual(response.status_code, 302)
+
+        self.client.login(username="knowledge_admin", password="SecurePass123!")
+        response = self.client.get(reverse("training_control_sample_zip"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/zip")
+
+        with zipfile.ZipFile(BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+
+        self.assertIn("clinical_knowledge_template.csv", names)
+        self.assertIn("respiratory_cases.csv", names)
+        self.assertIn("multi_specialty_cases.csv", names)
+        self.assertIn("warning_preview_examples.csv", names)
+        self.assertIn("README.txt", names)
+
+    def test_training_control_sample_zip_denies_non_developer_staff(self):
+        self.client.login(username="limited_staff", password="SecurePass123!")
+
+        response = self.client.get(reverse("training_control_sample_zip"))
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_train_condition_model_uses_admin_knowledge_entries(self):
+        for condition, specialization, note_prefix in (
+            ("Respiratory", "Pulmonology", "Provide inhaler support"),
+            ("Respiratory", "Pulmonology", "Review breathing pattern"),
+            ("Respiratory", "Pulmonology", "Monitor wheeze severity"),
+            ("Infection", "Internal Medicine", "Start hydration plan"),
+            ("Infection", "Internal Medicine", "Review antibiotic need"),
+            ("Infection", "Internal Medicine", "Monitor fever and throat pain"),
+        ):
+            ClinicalKnowledgeEntry.objects.create(
+                title=f"{condition} knowledge",
+                input_text=f"{condition} case details {uuid.uuid4().hex}",
+                ai_context=f"Clinical context for {condition}",
+                target_condition=condition,
+                target_specialization=specialization,
+                target_treatment=note_prefix,
+                quality_score=90,
+                is_approved=True,
+                created_by=self.user,
+            )
+
+        model_path = Path("medical_app") / "ml_models" / f"test-admin-report-classifier-{uuid.uuid4().hex}.pkl"
+        metrics_path = Path("medical_app") / "ml_models" / f"test-admin-report-metrics-{uuid.uuid4().hex}.json"
+        summary_path = Path("medical_app") / "ml_models" / f"test-admin-report-summary-{uuid.uuid4().hex}.json"
+
+        try:
+            call_command(
+                "train_condition_model",
+                output=str(model_path),
+                metrics_output=str(metrics_path),
+                summary_output=str(summary_path),
+                minimum_records=6,
+                source_types="admin_manual,admin_bulk_upload",
+            )
+
+            metrics = load_evaluation_report(metrics_path)
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(model_path.exists())
+            self.assertEqual(metrics["total_records"], 6)
+            self.assertEqual(summary["filtered_record_count"], 6)
+            self.assertEqual(summary["source_distribution"]["admin_manual"], 6)
+        finally:
+            for artifact_path in (model_path, metrics_path, summary_path):
+                if artifact_path.exists():
+                    artifact_path.unlink()
+
+    def test_train_qa_ranker_uses_approved_admin_knowledge_entries(self):
+        ClinicalKnowledgeEntry.objects.create(
+            title="Electrolyte support",
+            input_text="muscle cramps and weakness after dehydration",
+            ai_context="patient reports recent fluid loss",
+            target_condition="Electrolyte Imbalance",
+            target_specialization="Internal Medicine",
+            target_treatment="Use oral electrolyte solution and review hydration status.",
+            quality_score=91,
+            is_approved=True,
+            created_by=self.user,
+        )
+        ClinicalKnowledgeEntry.objects.create(
+            title="Migraine support",
+            input_text="severe headache with light sensitivity and nausea",
+            ai_context="classic migraine pattern",
+            target_condition="Migraine",
+            target_specialization="Neurology",
+            target_treatment="Rest in a dark room and use clinician-approved pain relief.",
+            quality_score=90,
+            is_approved=True,
+            created_by=self.user,
+        )
+
+        dataset_dir = make_scratch_dir("admin-knowledge-qa")
+        qa_model_path = Path("medical_app") / "ml_models" / f"test-admin-qa-ranker-{uuid.uuid4().hex}.pkl"
+        qa_corpus_path = Path("medical_app") / "ml_models" / f"test-admin-qa-corpus-{uuid.uuid4().hex}.jsonl"
+        qa_metrics_path = Path("medical_app") / "ml_models" / f"test-admin-qa-metrics-{uuid.uuid4().hex}.json"
+        qa_summary_path = Path("medical_app") / "ml_models" / f"test-admin-qa-summary-{uuid.uuid4().hex}.json"
+
+        try:
+            call_command(
+                "train_qa_ranker",
+                datasets_dir=str(dataset_dir),
+                dedupe=True,
+                output=str(qa_model_path),
+                corpus_output=str(qa_corpus_path),
+                metrics_output=str(qa_metrics_path),
+                summary_output=str(qa_summary_path),
+            )
+
+            qa_metrics = json.loads(qa_metrics_path.read_text(encoding="utf-8"))
+            qa_summary = json.loads(qa_summary_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(qa_model_path.exists())
+            self.assertEqual(qa_metrics["corpus_count"], 2)
+            self.assertEqual(qa_summary["approved_db"]["knowledge_entries"], 2)
+            self.assertEqual(qa_summary["total_entries_after_dedupe"], 2)
+        finally:
+            cleanup_scratch_dir(dataset_dir)
+            for artifact_path in (qa_model_path, qa_corpus_path, qa_metrics_path, qa_summary_path):
+                if artifact_path.exists():
+                    artifact_path.unlink()
+
+
 class BootstrapDefaultsCommandTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -1173,6 +1794,7 @@ class BootstrapDefaultsCommandTests(TestCase):
 
         self.assertEqual(FeaturedImage.objects.count(), 3)
         self.assertTrue(user_model.objects.filter(username="Admin").exists())
+        self.assertTrue(user_model.objects.get(username="Admin").profile.training_console_enabled)
 
 
 class MiddlewarePerformanceTests(TestCase):
@@ -1256,6 +1878,28 @@ class AccountSettingsTests(TestCase):
         self.assertEqual(self.user.first_name, "Updated")
         self.assertEqual(self.user.email, "updated@example.com")
         self.assertEqual(self.user.profile.mobile_number, "7777777777")
+
+    def test_profile_update_preserves_training_console_flag_when_field_is_not_exposed(self):
+        self.user.profile.training_console_enabled = True
+        self.user.profile.save(update_fields=["training_console_enabled", "updated_at"])
+        self.client.login(username="patient_user", password="SecurePass123!")
+
+        response = self.client.post(
+            reverse("change_credentials"),
+            {
+                "form_type": "profile",
+                "profile-first_name": "Patient",
+                "profile-last_name": "User",
+                "profile-email": "patient@example.com",
+                "profile-mobile_number": "8888888888",
+            },
+            follow=True,
+        )
+
+        self.user.profile.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.user.profile.training_console_enabled)
 
     def test_user_can_update_medical_and_preference_fields(self):
         self.client.login(username="patient_user", password="SecurePass123!")

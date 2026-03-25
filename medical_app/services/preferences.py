@@ -1,4 +1,5 @@
 from medical_app.models import UserProfile
+from medical_app.services.site_language import DEFAULT_SITE_LANGUAGE, normalize_language
 
 
 STYLE_INSTRUCTIONS = {
@@ -41,12 +42,12 @@ def get_user_profile(user):
 
 def resolve_language(user_profile, explicit_language=None):
     if explicit_language:
-        return explicit_language.strip().lower()
+        return normalize_language(explicit_language)
 
     if user_profile and user_profile.language_preference:
-        return user_profile.language_preference
+        return normalize_language(user_profile.language_preference)
 
-    return "english"
+    return DEFAULT_SITE_LANGUAGE
 
 
 def build_prompt_preferences(user_profile=None, *, explicit_language=None):

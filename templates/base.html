@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{ current_site_locale }}" dir="{{ current_site_direction }}">
 <head>
     {% load static %}
     <meta charset="UTF-8">
@@ -14,7 +14,8 @@
     <link rel="stylesheet" href="{% static 'css/style.css' %}">
     {% block extra_css %}{% endblock %}
 </head>
-<body>
+<body data-site-language="{{ current_site_language }}" data-site-direction="{{ current_site_direction }}">
+    {{ site_translation_catalog|json_script:"site-translation-catalog" }}
     <div class="app-shell">
         <a class="skip-link" href="#main-content">Skip to content</a>
 
@@ -103,13 +104,17 @@
                 </select>
             </section>
             <section class="settings-section">
-                <label for="language-select"><strong>Response Language</strong></label>
-                <select id="language-select" name="language" form="mainForm">
-                    <option value="english">English</option>
-                    <option value="hindi">Hindi</option>
-                    <option value="urdu">Urdu</option>
-                    <option value="arabic">Arabic</option>
-                    <option value="bengali">Bengali</option>
+                <label for="language-select"><strong>Website Language</strong></label>
+                <select
+                    id="language-select"
+                    name="language"
+                    data-language-switcher="true"
+                    data-language-endpoint="{% url 'set_site_language' %}"
+                    data-next-url="{{ request.get_full_path|urlencode }}"
+                >
+                    {% for code, label in supported_site_languages %}
+                        <option value="{{ code }}" {% if current_site_language == code %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
                 </select>
             </section>
         </aside>

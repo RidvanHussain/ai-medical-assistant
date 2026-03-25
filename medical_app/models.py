@@ -36,6 +36,7 @@ class UserProfile(models.Model):
     performance_mode = models.CharField(max_length=20, default="balanced")
     voice_summary_enabled = models.BooleanField(default=True)
     auto_compare_reports = models.BooleanField(default=True)
+    training_console_enabled = models.BooleanField(default=False)
     last_known_location = models.CharField(max_length=255, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -238,6 +239,184 @@ class TreatmentTrainingRecord(models.Model):
 
     def __str__(self):
         return f"Training record for treatment {self.treatment_id}"
+
+
+class AIModelConfiguration(models.Model):
+    configuration_key = models.CharField(max_length=40, unique=True, default="default", editable=False)
+    chat_model_name = models.CharField(
+        max_length=150,
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
+    )
+    analysis_model_name = models.CharField(
+        max_length=150,
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
+    )
+    system_prompt = models.TextField(blank=True)
+    temperature = models.FloatField(default=0.2)
+    top_p = models.FloatField(default=0.9)
+    max_output_tokens = models.PositiveIntegerField(default=900)
+    qa_min_confidence = models.FloatField(default=0.2)
+    classifier_min_class_occurrences = models.PositiveSmallIntegerField(default=3)
+    classifier_train_ratio = models.FloatField(default=0.8)
+    qa_train_ratio = models.FloatField(default=0.8)
+    random_seed = models.PositiveIntegerField(default=42)
+    auto_retrain_enabled = models.BooleanField(default=True)
+    auto_retrain_after_manual_entry = models.BooleanField(default=True)
+    auto_retrain_after_bulk_upload = models.BooleanField(default=True)
+    auto_retrain_after_doctor_review = models.BooleanField(default=False)
+    min_new_records_for_retrain = models.PositiveIntegerField(default=10)
+    retrain_cooldown_minutes = models.PositiveIntegerField(default=15)
+    pending_training_records = models.PositiveIntegerField(default=0)
+    last_trained_at = models.DateTimeField(blank=True, null=True)
+    last_training_status = models.CharField(max_length=20, default="idle")
+    last_training_message = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "AI Model Configuration"
+        verbose_name_plural = "AI Model Configuration"
+
+    def __str__(self):
+        return "Default AI model configuration"
+
+
+class AITrainingRun(models.Model):
+    STATUS_QUEUED = "queued"
+    STATUS_RUNNING = "running"
+    STATUS_SUCCESS = "success"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_SUCCESS, "Success"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    version_label = models.CharField(max_length=40, blank=True)
+    run_reason = models.CharField(max_length=255)
+    trigger_type = models.CharField(max_length=40, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    triggered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="ai_training_runs",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    pending_record_snapshot = models.PositiveIntegerField(default=0)
+    classifier_record_count = models.PositiveIntegerField(default=0)
+    qa_corpus_count = models.PositiveIntegerField(default=0)
+    classifier_accuracy = models.FloatField(blank=True, null=True)
+    classifier_macro_f1 = models.FloatField(blank=True, null=True)
+    classifier_weighted_f1 = models.FloatField(blank=True, null=True)
+    qa_hit_rate_at_1 = models.FloatField(blank=True, null=True)
+    qa_average_score = models.FloatField(blank=True, null=True)
+    is_active_version = models.BooleanField(default=False)
+    log_output = models.TextField(blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-started_at",)
+        indexes = [
+            models.Index(fields=["status", "-started_at"], name="training_run_status_idx"),
+            models.Index(fields=["is_active_version", "-started_at"], name="training_run_active_idx"),
+        ]
+
+    def __str__(self):
+        return self.version_label or f"Training run {self.pk}"
+
+
+class TrainingDatasetUpload(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_PROCESSED = "processed"
+    STATUS_PARTIAL = "partial"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSED, "Processed"),
+        (STATUS_PARTIAL, "Processed with warnings"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    title = models.CharField(max_length=150)
+    source_label = models.CharField(max_length=150, blank=True)
+    dataset_file = models.FileField(upload_to="training_uploads/")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    total_rows = models.PositiveIntegerField(default=0)
+    created_rows = models.PositiveIntegerField(default=0)
+    skipped_rows = models.PositiveIntegerField(default=0)
+    auto_retrain_requested = models.BooleanField(default=True)
+    processing_notes = models.TextField(blank=True)
+    summary_payload = models.JSONField(default=dict, blank=True)
+    error_report_file = models.FileField(upload_to="training_upload_errors/", blank=True, null=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="training_dataset_uploads",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    processed_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return self.title
+
+
+class ClinicalKnowledgeEntry(models.Model):
+    SOURCE_ADMIN_MANUAL = "admin_manual"
+    SOURCE_ADMIN_BULK_UPLOAD = "admin_bulk_upload"
+    SOURCE_CHOICES = [
+        (SOURCE_ADMIN_MANUAL, "Admin manual entry"),
+        (SOURCE_ADMIN_BULK_UPLOAD, "Admin bulk upload"),
+    ]
+
+    title = models.CharField(max_length=150, blank=True)
+    source_type = models.CharField(max_length=40, choices=SOURCE_CHOICES, default=SOURCE_ADMIN_MANUAL)
+    input_text = models.TextField()
+    ai_context = models.TextField(blank=True)
+    target_condition = models.CharField(max_length=120)
+    target_specialization = models.CharField(max_length=150, blank=True)
+    target_treatment = models.TextField()
+    feature_snapshot = models.JSONField(default=dict, blank=True)
+    quality_score = models.PositiveSmallIntegerField(default=70)
+    is_approved = models.BooleanField(default=True)
+    review_notes = models.CharField(max_length=255, blank=True)
+    uploaded_batch = models.ForeignKey(
+        TrainingDatasetUpload,
+        related_name="knowledge_entries",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name="clinical_knowledge_entries",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-updated_at",)
+        indexes = [
+            models.Index(
+                fields=["source_type", "is_approved", "-updated_at"],
+                name="knowledge_source_approved_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return self.title or f"{self.target_condition} knowledge entry"
 
 
 class ChatSession(models.Model):
