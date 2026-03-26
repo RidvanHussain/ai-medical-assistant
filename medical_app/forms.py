@@ -215,16 +215,6 @@ class RegisterForm(UserCreationForm):
             }
         ),
     )
-    mobile_number = forms.CharField(
-        label="Mobile Number",
-        max_length=20,
-        widget=forms.TelInput(
-            attrs={
-                **MOBILE_FIELD_ATTRS,
-                "placeholder": "Enter mobile number",
-            }
-        ),
-    )
     password1 = forms.CharField(
         label="Password",
         widget=forms.PasswordInput(
@@ -246,7 +236,7 @@ class RegisterForm(UserCreationForm):
 
     class Meta:
         model = user_model
-        fields = ("first_name", "last_name", "email", "mobile_number", "password1", "password2")
+        fields = ("first_name", "last_name", "email", "password1", "password2")
 
     def clean_email(self):
         email = self.cleaned_data["email"].strip().lower()
@@ -255,12 +245,6 @@ class RegisterForm(UserCreationForm):
         if user_model.objects.filter(email__iexact=email).exists():
             raise forms.ValidationError("An account with this email already exists.")
         return email
-
-    def clean_mobile_number(self):
-        mobile_number = self.cleaned_data["mobile_number"].strip()
-        if not mobile_number.isdigit() or len(mobile_number) < 10 or len(mobile_number) > 15:
-            raise forms.ValidationError("Enter a valid mobile number with 10 to 15 digits.")
-        return mobile_number
 
     def save(self, commit=True):
         user = super().save(commit=False)
@@ -273,7 +257,7 @@ class RegisterForm(UserCreationForm):
             user.save()
             UserProfile.objects.update_or_create(
                 user=user,
-                defaults={"mobile_number": self.cleaned_data["mobile_number"].strip()},
+                defaults={"mobile_number": ""},
             )
 
         return user
@@ -283,7 +267,7 @@ class RegisterForm(UserCreationForm):
             first_name=self.cleaned_data["first_name"].strip(),
             last_name=self.cleaned_data["last_name"].strip(),
             email=self.cleaned_data["email"].strip().lower(),
-            mobile_number=self.cleaned_data["mobile_number"].strip(),
+            mobile_number="",
             password_hash=make_password(self.cleaned_data["password1"]),
         )
 
@@ -542,32 +526,10 @@ class RegistrationOTPForm(forms.Form):
             }
         ),
     )
-    mobile_otp = forms.CharField(
-        label="Mobile OTP",
-        max_length=6,
-        min_length=6,
-        widget=forms.TextInput(
-            attrs={
-                **TEXT_INPUT_ATTRS,
-                "placeholder": "Enter 6-digit mobile OTP",
-                "inputmode": "numeric",
-                "autocomplete": "one-time-code",
-                "pattern": r"^[0-9]{6}$",
-                "title": "Enter the 6-digit OTP sent to your mobile.",
-            }
-        ),
-    )
-
     def clean_email_otp(self):
         value = (self.cleaned_data["email_otp"] or "").strip()
         if not value.isdigit():
             raise forms.ValidationError("Enter a valid 6-digit email OTP.")
-        return value
-
-    def clean_mobile_otp(self):
-        value = (self.cleaned_data["mobile_otp"] or "").strip()
-        if not value.isdigit():
-            raise forms.ValidationError("Enter a valid 6-digit mobile OTP.")
         return value
 
 

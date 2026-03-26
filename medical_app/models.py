@@ -124,17 +124,8 @@ class PendingRegistration(models.Model):
             masked_local = f"{local_part[:2]}{'*' * max(1, len(local_part) - 2)}"
         return f"{masked_local}@{domain}"
 
-    @property
-    def masked_mobile_number(self):
-        if len(self.mobile_number) <= 4:
-            return "*" * len(self.mobile_number)
-        return f"{'*' * (len(self.mobile_number) - 4)}{self.mobile_number[-4:]}"
-
     def matches_email_otp(self, otp_value):
         return bool(self.email_otp_hash and otp_value and check_password(otp_value, self.email_otp_hash))
-
-    def matches_mobile_otp(self, otp_value):
-        return bool(self.mobile_otp_hash and otp_value and check_password(otp_value, self.mobile_otp_hash))
 
 
 class MedicalAnalysis(models.Model):

@@ -249,15 +249,6 @@ EMAIL_HOST_PASSWORD = os.getenv("DJANGO_EMAIL_HOST_PASSWORD", "")
 EMAIL_USE_TLS = os.getenv("DJANGO_EMAIL_USE_TLS", "true").lower() in {"1", "true", "yes", "on"}
 EMAIL_USE_SSL = os.getenv("DJANGO_EMAIL_USE_SSL", "false").lower() in {"1", "true", "yes", "on"}
 
-SMS_BACKEND = os.getenv("DJANGO_SMS_BACKEND") or (
-    "twilio" if os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN") else "console"
-)
-SMS_BACKEND = SMS_BACKEND.lower()
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "")
-DEFAULT_PHONE_COUNTRY_CODE = os.getenv("DJANGO_DEFAULT_PHONE_COUNTRY_CODE", "+91")
-
 REGISTRATION_OTP_EXPIRY_MINUTES = int(os.getenv("REGISTRATION_OTP_EXPIRY_MINUTES", "10"))
 REGISTRATION_OTP_MAX_ATTEMPTS = int(os.getenv("REGISTRATION_OTP_MAX_ATTEMPTS", "5"))
 

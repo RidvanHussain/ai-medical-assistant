@@ -247,7 +247,7 @@ The dashboard and history pages provide:
 
 ### OTP Registration
 
-New users register with first name, last name, email, mobile number, and password. Account creation completes only after both the email OTP and mobile OTP are verified.
+New users register with first name, last name, email, and password. Account creation completes only after the email OTP is verified.
 
 ### Gmail Login
 
@@ -395,31 +395,34 @@ Important settings include:
 - `GOOGLE_OAUTH_CLIENT_ID`
 - `GOOGLE_OAUTH_CLIENT_SECRET`
 - `DJANGO_EMAIL_BACKEND`
-- `DJANGO_SMS_BACKEND`
-- `TWILIO_ACCOUNT_SID`
-- `TWILIO_AUTH_TOKEN`
-- `TWILIO_FROM_NUMBER`
-- `DJANGO_DEFAULT_PHONE_COUNTRY_CODE`
+- `DJANGO_EMAIL_HOST`
+- `DJANGO_EMAIL_HOST_USER`
+- `DJANGO_EMAIL_HOST_PASSWORD`
 
 ## OTP Delivery Notes
 
 ### Local Development
 
 - Email OTPs can use Django's console email backend.
-- Mobile OTPs can use the console SMS backend.
 - In that mode, codes are printed to server output.
 
 ### Real Delivery
 
-To send real OTPs:
+To send real email OTPs:
 
 1. Configure SMTP settings and set `DJANGO_EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend`
-2. Configure Twilio credentials and set `DJANGO_SMS_BACKEND=twilio`
-3. Set `DJANGO_DEFAULT_PHONE_COUNTRY_CODE` if users enter local numbers without a `+` prefix
+2. For a free Gmail-based setup, use:
+   - `DJANGO_EMAIL_HOST=smtp.gmail.com`
+   - `DJANGO_EMAIL_PORT=587`
+   - `DJANGO_EMAIL_USE_TLS=true`
+   - `DJANGO_EMAIL_HOST_USER=your-gmail-address`
+   - `DJANGO_EMAIL_HOST_PASSWORD=your-gmail-app-password`
+3. Use a Gmail App Password instead of your normal Gmail password.
+4. SMS/Twilio settings are no longer required for registration because OTP verification is email-only.
 
 ## Operations
 
-- Health check endpoint: `/health/`
+- Health check endpoint: `/healthz`
 - Admin panel: `/admin/`
 - Developer training center: available to approved developer admins from the dashboard/admin flow
 - Friendly custom error pages for 403, 404, and 500 responses are included
@@ -436,7 +439,7 @@ python manage.py test medical_app
 Current validation snapshot:
 
 - `python manage.py check` passes
-- `python manage.py test medical_app` passes with **71 / 71 tests**
+- `python manage.py test medical_app` passes with **72 / 72 tests**
 
 ## Major Project Report
 

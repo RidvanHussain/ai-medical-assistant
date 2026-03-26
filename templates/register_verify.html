@@ -14,15 +14,15 @@
                 >
                 <div>
                     <p class="eyebrow">AI Medical Assistant</p>
-                    <p class="auth-brand-copy">Dual-channel OTP verification</p>
+                    <p class="auth-brand-copy">Email OTP verification</p>
                 </div>
             </div>
 
             <p class="eyebrow">Account Verification</p>
-            <h1>Verify your email and mobile OTP</h1>
+            <h1>Verify your email OTP</h1>
             <p class="auth-subtitle">
-                We sent separate verification codes to <strong>{{ pending_registration.masked_email }}</strong>
-                and <strong>{{ pending_registration.masked_mobile_number }}</strong>. Enter both OTPs to complete account creation.
+                We sent a verification code to <strong>{{ pending_registration.masked_email }}</strong>.
+                Enter the email OTP to complete account creation.
             </p>
 
             {% if otp_demo_note %}
@@ -42,13 +42,7 @@
                     <div class="error">{{ form.email_otp.errors|striptags }}</div>
                 {% endif %}
 
-                <label for="{{ form.mobile_otp.id_for_label }}">Mobile OTP</label>
-                {{ form.mobile_otp }}
-                {% if form.mobile_otp.errors %}
-                    <div class="error">{{ form.mobile_otp.errors|striptags }}</div>
-                {% endif %}
-
-                <p class="field-note">Both OTPs expire in {{ otp_expiry_minutes }} minutes. Registration will finish only after successful verification.</p>
+                <p class="field-note">The email OTP expires in {{ otp_expiry_minutes }} minutes. Registration will finish after successful email verification.</p>
 
                 <div class="form-actions">
                     <button type="submit">Verify and Create Account</button>

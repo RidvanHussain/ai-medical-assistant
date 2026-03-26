@@ -3,7 +3,7 @@ from django.contrib import messages
 from django.contrib.auth import get_user_model, login, logout, update_session_auth_hash
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.forms import PasswordChangeForm
-from django.db.models import Prefetch, Q
+from django.db.models import Prefetch
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -77,7 +77,7 @@ def _create_user_from_pending_registration(pending_registration):
     user.save()
     UserProfile.objects.update_or_create(
         user=user,
-        defaults={"mobile_number": pending_registration.mobile_number.strip()},
+        defaults={"mobile_number": ""},
     )
     return user
 
@@ -91,18 +91,10 @@ def _mark_current_login_inactive(request):
 
 
 def _build_otp_delivery_note():
-    notes = []
-
     if settings.EMAIL_BACKEND == "django.core.mail.backends.console.EmailBackend":
-        notes.append("Email OTPs are currently printed in the server terminal.")
+        return "Email OTPs are currently printed in the server terminal."
 
-    if settings.SMS_BACKEND == "console":
-        notes.append("Mobile OTPs are currently printed in the server terminal.")
-
-    if not notes:
-        return "Email and mobile OTP delivery are configured for external providers."
-
-    return " ".join(notes)
+    return "Email OTP delivery is configured for your email provider."
 
 
 def _resolve_safe_next_url(request, requested_next):
@@ -522,10 +514,7 @@ def register_view(request):
     form = RegisterForm(request.POST or None)
 
     if request.method == "POST" and form.is_valid():
-        PendingRegistration.objects.filter(
-            Q(email__iexact=form.cleaned_data["email"])
-            | Q(mobile_number=form.cleaned_data["mobile_number"])
-        ).delete()
+        PendingRegistration.objects.filter(email__iexact=form.cleaned_data["email"]).delete()
         pending_registration = form.create_pending_registration()
         try:
             issue_registration_otp_challenge(pending_registration)
@@ -538,7 +527,7 @@ def register_view(request):
             return render(request, "register.html", {"form": form})
         messages.success(
             request,
-            "Verification OTPs have been sent to your email address and mobile number.",
+            "A verification OTP has been sent to your email address.",
         )
         return redirect("register_verify", token=pending_registration.verification_token)
 
@@ -568,7 +557,7 @@ def register_verify_view(request, token):
                     "We could not resend the OTP right now. Please try again shortly.",
                 )
                 return redirect("register_verify", token=pending_registration.verification_token)
-            messages.info(request, "A new email and mobile OTP have been sent.")
+            messages.info(request, "A new email OTP has been sent.")
             return redirect("register_verify", token=pending_registration.verification_token)
 
         if pending_registration.is_expired:
@@ -585,14 +574,11 @@ def register_verify_view(request, token):
             pending_registration.save(update_fields=["verification_attempts", "updated_at"])
 
             email_matches = pending_registration.matches_email_otp(form.cleaned_data["email_otp"])
-            mobile_matches = pending_registration.matches_mobile_otp(form.cleaned_data["mobile_otp"])
 
             if not email_matches:
                 form.add_error("email_otp", "The email OTP is incorrect.")
-            if not mobile_matches:
-                form.add_error("mobile_otp", "The mobile OTP is incorrect.")
 
-            if email_matches and mobile_matches:
+            if email_matches:
                 try:
                     user = _create_user_from_pending_registration(pending_registration)
                 except ValueError as error:

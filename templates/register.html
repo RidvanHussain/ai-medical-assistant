@@ -20,7 +20,7 @@
 
             <p class="eyebrow">New Account</p>
             <h1>Create your workspace</h1>
-            <p class="auth-subtitle">Set up a secure account with profile details, dashboard access, login tracking, and OTP verification.</p>
+            <p class="auth-subtitle">Set up a secure account with profile details, dashboard access, login tracking, and email OTP verification.</p>
 
             <form method="post" class="stack-form">
                 {% csrf_token %}
@@ -47,14 +47,9 @@
                     <div class="error">{{ form.email.errors|striptags }}</div>
                 {% endif %}
 
-                <label for="{{ form.mobile_number.id_for_label }}">Mobile Number</label>
-                {{ form.mobile_number }}
-                {% if form.mobile_number.errors %}
-                    <div class="error">{{ form.mobile_number.errors|striptags }}</div>
-                {% endif %}
-
                 <ul class="password-rules">
                     <li>Email ID is used for sign-in.</li>
+                    <li>A verification OTP will be sent to your email address.</li>
                     <li>Use at least 8 characters.</li>
                     <li>Avoid common or easily guessed passwords.</li>
                     <li>Do not use a password made entirely of numbers.</li>
@@ -72,7 +67,7 @@
                     <div class="error">{{ form.password2.errors|striptags }}</div>
                 {% endif %}
 
-                <button type="submit">Continue to OTP Verification</button>
+                <button type="submit">Continue to Email Verification</button>
             </form>
 
             <p class="auth-link">

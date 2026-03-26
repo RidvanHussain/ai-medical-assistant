@@ -472,10 +472,10 @@ class RegistrationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'data-live-validate="email"')
-        self.assertContains(response, 'data-live-validate="mobile"')
+        self.assertNotContains(response, 'data-live-validate="mobile"')
         self.assertContains(response, "medical-assistant-logo.svg")
 
-    @patch("medical_app.verification.generate_otp_code", side_effect=["123456", "654321"])
+    @patch("medical_app.verification.generate_otp_code", return_value="123456")
     def test_registration_creates_profile_with_required_fields(self, mock_codes):
         response = self.client.post(
             reverse("register"),
@@ -483,7 +483,6 @@ class RegistrationTests(TestCase):
                 "first_name": "Ava",
                 "last_name": "Stone",
                 "email": "ava@example.com",
-                "mobile_number": "9876543210",
                 "password1": "StrongPass123!",
                 "password2": "StrongPass123!",
             },
@@ -493,7 +492,7 @@ class RegistrationTests(TestCase):
         pending = PendingRegistration.objects.get(email="ava@example.com")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Verify your email and mobile OTP")
+        self.assertContains(response, "Verify your email OTP")
         self.assertFalse(user_model.objects.filter(email="ava@example.com").exists())
         self.assertEqual(len(mail.outbox), 1)
 
@@ -501,7 +500,6 @@ class RegistrationTests(TestCase):
             reverse("register_verify", args=[pending.verification_token]),
             {
                 "email_otp": "123456",
-                "mobile_otp": "654321",
             },
             follow=True,
         )
@@ -510,17 +508,16 @@ class RegistrationTests(TestCase):
 
         self.assertEqual(verify_response.status_code, 200)
         self.assertEqual(user.first_name, "Ava")
-        self.assertEqual(user.profile.mobile_number, "9876543210")
+        self.assertEqual(user.profile.mobile_number, "")
         self.assertFalse(PendingRegistration.objects.filter(email="ava@example.com").exists())
 
-    def test_registration_rejects_invalid_email_and_mobile(self):
+    def test_registration_rejects_invalid_email(self):
         response = self.client.post(
             reverse("register"),
             {
                 "first_name": "Ava",
                 "last_name": "Stone",
                 "email": "invalid-email",
-                "mobile_number": "98AB765",
                 "password1": "StrongPass123!",
                 "password2": "StrongPass123!",
             },
@@ -528,10 +525,9 @@ class RegistrationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Enter a valid email ID.")
-        self.assertContains(response, "Enter a valid mobile number with 10 to 15 digits.")
         self.assertFalse(user_model.objects.filter(email="invalid-email").exists())
 
-    @patch("medical_app.verification.generate_otp_code", side_effect=["123456", "654321"])
+    @patch("medical_app.verification.generate_otp_code", return_value="123456")
     def test_registration_does_not_complete_with_invalid_otp(self, mock_codes):
         self.client.post(
             reverse("register"),
@@ -539,7 +535,6 @@ class RegistrationTests(TestCase):
                 "first_name": "Ava",
                 "last_name": "Stone",
                 "email": "ava@example.com",
-                "mobile_number": "9876543210",
                 "password1": "StrongPass123!",
                 "password2": "StrongPass123!",
             },
@@ -550,13 +545,11 @@ class RegistrationTests(TestCase):
             reverse("register_verify", args=[pending.verification_token]),
             {
                 "email_otp": "111111",
-                "mobile_otp": "222222",
             },
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "The email OTP is incorrect.")
-        self.assertContains(response, "The mobile OTP is incorrect.")
         self.assertFalse(user_model.objects.filter(email="ava@example.com").exists())
 
 
